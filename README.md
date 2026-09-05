@@ -18,21 +18,23 @@ not from the WebGPU path (see Verification).
 ## Deploy
 
 A GitHub Actions workflow (`.github/workflows/pages.yml`) builds and publishes
-the site on every push to `main`. It is already committed and already ran.
+the site on every push to `main`.
 
-**It needs one manual step first: the repository has to be public.** GitHub
-Pages is only available for private repositories on a paid plan, so on GitHub
-Free the deploy fails at `actions/configure-pages` until visibility changes.
+**It needs Pages switched on first, which has to be done by hand once.** The
+workflow's own `GITHUB_TOKEN` is not permitted to create a Pages site, so
+`configure-pages` cannot bootstrap it (`Create Pages site failed: Resource not
+accessible by integration`), and the API path is likewise off limits to most
+integration tokens.
 
-1. Settings -> General -> Danger Zone -> **Change repository visibility** ->
-   Make public.
-2. Re-run the failed job (Actions -> *Deploy to GitHub Pages* -> **Re-run all
-   jobs**), or just push anything to `main`.
+1. **Settings -> Pages -> Build and deployment -> Source -> "GitHub Actions"**
+   (<https://github.com/jeffbaumes/mebee/settings/pages>)
+2. Re-run the workflow, or push anything to `main`.
 
-The site then lands at <https://jeffbaumes.github.io/mebee/>. Nothing else needs
-configuring — `configure-pages` runs with `enablement: true`, so it switches
-Pages on itself; the shader loader resolves paths against its own module URL,
-so the project subpath works.
+The repository also has to be public, unless the account is on a paid plan --
+GitHub Pages is not available for private repositories on GitHub Free.
+
+The site then lands at <https://jeffbaumes.github.io/mebee/>. The shader loader
+resolves paths against its own module URL, so the project subpath works.
 
 ## Run it
 

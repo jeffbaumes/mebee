@@ -24,13 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # enablement:true turns Pages on using this workflow's own token, so the
-      # site can go live without anyone touching repository settings by hand.
-      # It still requires Pages to be available for the repo, which on a free
-      # plan means the repo must be public.
+      # Pages must already be switched on, with its source set to "GitHub
+      # Actions", before this runs. configure-pages has an `enablement: true`
+      # option that is supposed to do that automatically, but the workflow's
+      # GITHUB_TOKEN is not permitted to create a Pages site -- it fails with
+      # "Create Pages site failed: Resource not accessible by integration"
+      # regardless of the `pages: write` permission below. Enabling Pages is a
+      # one-time manual step; see README.
       - uses: actions/configure-pages@v5
-        with:
-          enablement: true
 
       - name: Stage the site
         run: |
