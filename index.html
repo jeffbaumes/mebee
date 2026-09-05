@@ -36,6 +36,11 @@
   .row output { font-size: 11px; color: #8d949b; font-variant-numeric: tabular-nums; }
   .row input[type=range] { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: #d98cae; }
   .row.check { grid-template-columns: auto 1fr; }
+  .row select, .row button { grid-column: 1 / -1; width: 100%; background: #1b1e21;
+    color: #e8e6e3; border: 1px solid var(--line); border-radius: 6px;
+    padding: 5px 7px; font: inherit; font-size: 12px; cursor: pointer; }
+  #diag { margin: 6px 0 0; font: 10.5px/1.4 ui-monospace, monospace; color: #9aa0a6;
+    white-space: pre-wrap; word-break: break-all; }
 
   #loading, #error { position: absolute; inset: 0; display: grid; place-content: center;
     text-align: center; gap: 8px; padding: 24px; pointer-events: auto; background: #0b0d0f; }
@@ -91,10 +96,28 @@
         <input type="range" id="focalLength" min="0.028" max="0.135" step="0.001" value="0.055" data-digits="3">
       </div>
 
+      <div class="group">Diagnostics</div>
+      <div class="row">
+        <label for="debugView">View</label><output></output>
+        <select id="debugView">
+          <option value="0">Final</option>
+          <option value="1">Main pass (HDR)</option>
+          <option value="2">Main pass, x40 lift</option>
+          <option value="3">Depth</option>
+          <option value="4">Circle of confusion</option>
+          <option value="5">Defocus buffer</option>
+          <option value="6">Bloom</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="diagnose" type="button">Read back GPU state</button>
+      </div>
+      <pre id="diag"></pre>
+
       <div class="group">Grade</div>
       <div class="row">
         <label for="exposure">Exposure</label><output id="exposure-val"></output>
-        <input type="range" id="exposure" min="0.2" max="3" step="0.01" value="1">
+        <input type="range" id="exposure" min="0.05" max="3" step="0.01" value="0.5">
       </div>
       <div class="row">
         <label for="bloomStrength">Lens flare</label><output id="bloomStrength-val" data-digits="3"></output>

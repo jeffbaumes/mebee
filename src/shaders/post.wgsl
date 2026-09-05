@@ -40,8 +40,39 @@ fn fs(i: VOut) -> @location(0) vec4f {
   // plane" and would put a sharp seam along the last row and column.
   let dc = clamp(vec2i(uv * G.screen.xy), vec2i(0), vec2i(G.screen.xy) - vec2i(1));
   let d = textureLoad(depthTex, dc, 0);
-  let coc = abs(signedCoC(linearDepth(d)));
+  let cocSigned = signedCoC(linearDepth(d));
+  let coc = abs(cocSigned);
   let blend = smoothstep(0.5, 2.2, coc);
+
+  // Debug views. Each isolates one stage so a black frame can be attributed
+  // rather than guessed at: whether the main pass drew anything at all, what
+  // depth it wrote, what the defocus and bloom chains made of it.
+  let dbg = i32(G.plant.w + 0.5);
+  if (dbg != 0) {
+    let sharp = textureSampleLevel(sharpTex, linearSamp, uv, 0.0).rgb;
+    if (dbg == 1) {                       // HDR straight out of the main pass
+      return vec4f(linearToSrgb(tonemapACES(sharp * G.state.z)), 1.0);
+    }
+    if (dbg == 2) {                       // HDR, no tonemap, heavily lifted
+      return vec4f(linearToSrgb(sharp * 40.0), 1.0);
+    }
+    if (dbg == 3) {                       // linear depth as bands
+      let z = linearDepth(d);
+      return vec4f(vec3f(fract(z * 8.0) * step(z, 11.0)), 1.0);
+    }
+    if (dbg == 4) {                       // circle of confusion: red near, green far
+      let m = clamp(coc / 48.0, 0.0, 1.0);
+      return vec4f(select(vec3f(0.0, m, 0.0), vec3f(m, 0.0, 0.0), cocSigned < 0.0), 1.0);
+    }
+    if (dbg == 5) {                       // defocused half-res buffer
+      return vec4f(linearToSrgb(tonemapACES(
+        textureSampleLevel(blurTex, linearSamp, uv, 0.0).rgb * G.state.z)), 1.0);
+    }
+    if (dbg == 6) {                       // bloom chain
+      return vec4f(linearToSrgb(tonemapACES(
+        textureSampleLevel(bloomTex, linearSamp, uv, 0.0).rgb * 8.0)), 1.0);
+    }
+  }
 
   // Lateral chromatic aberration: the lens focuses short wavelengths closer,
   // so channels land at slightly different scales. Zero on axis, growing with

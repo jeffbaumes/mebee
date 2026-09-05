@@ -161,7 +161,10 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   // terminator, and a hard Lambert edge reads as plastic.
   let wrap = 0.18;
   let diff = max(0.0, (ndl + wrap) / (1.0 + wrap));
-  color += albedo * sun * diff * shade / PI * 3.0;
+  // Lambert: albedo/pi * E * cos. No fudge factor -- with the ambient term
+  // below now correctly scaled, the sun-to-sky ratio falls out of the physics
+  // rather than being dialled in, and exposure is the only knob left.
+  color += albedo * sun * diff * shade / PI;
 
   // Specular. Leaves get anisotropic GGX along the vein grain; everything else
   // is isotropic. The cuticle is a dielectric, so f0 stays low.
@@ -193,7 +196,7 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   // Sky ambient, plus a bounce term from below.
   let ambient = skyAmbient(N);
   let bounce = skyAmbient(-N) * 0.22 * vec3f(0.55, 0.62, 0.38);
-  color += albedo * (ambient + bounce) * ao * 0.32;
+  color += albedo * (ambient + bounce) * ao;
 
   // Sheen: the waxy cuticle brightens hard at grazing angles.
   let sheen = pow(1.0 - ndv, 4.5) * M.surface.w;

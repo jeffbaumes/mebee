@@ -101,6 +101,11 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   node.pos = vec4f(pos, restH);
   node.prev = vec4f(prev, 0.0);
   stemNodes[i] = node;
+  // storageBarrier, not workgroupBarrier: the latter orders workgroup memory
+  // only, so thread 0's frame writes below could be clobbered by another
+  // thread's whole-struct write above, leaving the axis stale or garbage --
+  // and a zero axis normalises to NaN, which silently deletes the plant.
+  storageBarrier();
   workgroupBarrier();
 
   // --- frames by parallel transport --------------------------------------

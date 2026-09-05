@@ -157,13 +157,22 @@ fn skyRadiance(dir: vec3f, sunDir: vec3f) -> vec3f {
   return (sumR * BETA_R * phaseR + sumM * BETA_M * phaseM) * G.sunColor.w;
 }
 
-/** Ambient irradiance from the sky, reconstructed from band-0/1 SH. */
+/**
+ * Ambient irradiance from the sky, reconstructed from band-0/1 SH.
+ *
+ * The stored coefficients are cosine-convolved radiance projections; turning
+ * them back into irradiance needs the SH basis constants (Y00 and Y1m), which
+ * were missing here -- without them the DC term came out about 3.5x too strong
+ * and the linear terms twice too weak, so ambient was both too bright and
+ * flat. Divided by pi to give the outgoing radiance of a Lambertian surface,
+ * which is what the shading below actually wants.
+ */
 fn skyAmbient(n: vec3f) -> vec3f {
-  let c = G.shL0.rgb
-        + G.shL1y.rgb * n.y
-        + G.shL1z.rgb * n.z
-        + G.shL1x.rgb * n.x;
-  return max(c, vec3f(0.0));
+  const Y00 = 0.282095;
+  const Y1  = 0.488603;
+  let c = G.shL0.rgb * Y00
+        + (G.shL1y.rgb * n.y + G.shL1z.rgb * n.z + G.shL1x.rgb * n.x) * Y1;
+  return max(c, vec3f(0.0)) / PI;
 }
 
 // ---------------------------------------------------------------------------

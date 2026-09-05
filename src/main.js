@@ -17,13 +17,18 @@ const state = {
   time: 0,
   bloom: 1.0,              // 0 = bud, 1 = open
   floretFront: 0.35,       // maturation front; sweeps 1 -> 0 as the disc opens
-  exposure: 1.0,
+  // Direct sun now enters as albedo/pi * E, so a mid-grey (0.18) under a
+  // sunIntensity of 20 lands near 1.15 pre-tonemap -- close to clipping.
+  // Halving brings it to a mid-tone; this is the knob to reach for first if
+  // the image comes out blown or muddy.
+  exposure: 0.5,
   bloomStrength: 0.055,
   grain: 0.020,
   chromatic: 0.0022,
   vignette: 0.85,
   renderScale: 1.0,
   animate: true,
+  debugView: 0,
 };
 
 const camera = new MacroCamera();
@@ -105,6 +110,9 @@ function bindControls() {
   document.getElementById('panel-toggle').addEventListener('click', () => {
     document.getElementById('panel').classList.toggle('collapsed');
   });
+  document.getElementById('debugView').addEventListener('change', (e) => {
+    state.debugView = parseInt(e.target.value, 10) || 0;
+  });
 }
 
 function resizeCanvas() {
@@ -138,8 +146,15 @@ function resizeCanvas() {
     return;
   }
 
+  let reportedErrors = 0;
   gpu.device.addEventListener?.('uncapturederror', (e) => {
-    console.error('WebGPU error:', e.error?.message ?? e);
+    const msg = e.error?.message ?? String(e);
+    console.error('WebGPU error:', msg);
+    // Only the first few: a per-frame error would otherwise flood the panel.
+    if (reportedErrors++ < 3) {
+      const el = document.getElementById('diag');
+      if (el) el.textContent = `GPU error: ${msg.slice(0, 400)}`;
+    }
   });
 
   bindInput();
@@ -147,6 +162,29 @@ function resizeCanvas() {
   document.getElementById('build').textContent =
     `build ${globalThis.__BUILD__ ?? 'dev'}`;
   document.getElementById('loading').hidden = true;
+
+  // Readback diagnostics. Reported on screen as well as logged, so the numbers
+  // can be relayed without needing devtools open.
+  const diag = document.getElementById('diag');
+  document.getElementById('diagnose').addEventListener('click', async () => {
+    diag.textContent = 'reading…';
+    try {
+      const [hdr, stem] = await Promise.all([renderer.probeHDR(), renderer.probeStem()]);
+      const text =
+        `hdr  min ${hdr.min.toExponential(2)}  max ${hdr.max.toExponential(2)}\n` +
+        `     mean ${hdr.mean.toExponential(2)}  nan ${(hdr.nanFraction * 100).toFixed(1)}%\n` +
+        `stem finite=${stem.finite}\n` +
+        `     n0 ${JSON.stringify(stem.first.pos)}\n` +
+        `     n15 ${JSON.stringify(stem.last.pos)}\n` +
+        `     axis15 ${JSON.stringify(stem.last.axis)}\n` +
+        `cam  ${camera.position.map((v) => v.toFixed(3)).join(', ')}  d=${camera.distance.toFixed(3)}`;
+      diag.textContent = text;
+      console.log(text);
+    } catch (e) {
+      diag.textContent = `probe failed: ${e.message}`;
+      console.error(e);
+    }
+  });
 
   let last = performance.now();
   let frames = 0, fpsClock = last;

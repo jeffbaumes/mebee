@@ -95,7 +95,7 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   albedo = mix(albedo, vec3f(0.96, 0.80, 0.30), pollen * 0.9);
 
   let shade = shadowFactor(i.world, ndl);
-  var color = albedo * sun * max(0.0, ndl) * shade / PI * 3.0;
+  var color = albedo * sun * max(0.0, ndl) * shade / PI;
 
   // Pollen grains are rough dielectric powder: broad, dim specular.
   let rough = mix(0.85, 0.55, pollen);
@@ -104,6 +104,6 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   let Gv = smithGGX(ndv, max(0.0, ndl), rough);
   color += sun * shade * max(0.0, ndl) * D * Gv * 0.04 / max(1e-4, 4.0 * ndv);
 
-  color += albedo * skyAmbient(N) * 0.30;
+  color += albedo * skyAmbient(N);
   return vec4f(color, 1.0);
 }

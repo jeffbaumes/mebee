@@ -135,7 +135,8 @@ export class Renderer {
       nodes[o + 12] = 1; nodes[o + 13] = 0; nodes[o + 14] = 0; // side +X
     }
     this.stemBuffer = createBuffer(device, nodes,
-      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, 'stemNodes');
+      GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      'stemNodes');
     this.landingBuffer = device.createBuffer({
       label: 'landingSites',
       size: 4 * 4 * 3,
@@ -501,7 +502,10 @@ export class Renderer {
                      this.bloomTexture]) t?.destroy();
 
     const target = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
-    this.hdrTexture = device.createTexture({ label: 'hdr', size: [w, h], format: HDR_FORMAT, usage: target });
+    this.hdrTexture = device.createTexture({
+      label: 'hdr', size: [w, h], format: HDR_FORMAT,
+      usage: target | GPUTextureUsage.COPY_SRC,
+    });
     this.depthTexture = device.createTexture({ label: 'depth', size: [w, h], format: DEPTH_FORMAT, usage: target });
     this.halfA = device.createTexture({ label: 'dofA', size: [this.halfW, this.halfH], format: HDR_FORMAT, usage: target });
     this.halfB = device.createTexture({ label: 'dofB', size: [this.halfW, this.halfH], format: HDR_FORMAT, usage: target });
@@ -589,14 +593,21 @@ export class Renderer {
     ]);
     this.updateSkySH(sunDir);
 
-    // Sun view-projection, fitted tightly around the plant.
-    const HALF = 0.115, NEAR = 0.02, FAR = 0.95;
+    // Sun view-projection, fitted around the whole plant.
+    //
+    // Two bugs lived here: the eye's height was set to sunDir.y * dist with no
+    // base offset, putting the "sun" below the point it looked at so the scene
+    // was lit and shadowed from underneath; and the ortho half-extent was 0.115
+    // for a plant 0.40m tall, so most of the stem fell outside the shadow map.
+    const HALF = 0.30, NEAR = 0.02, FAR = 1.6;
+    const centre = [camera.target[0], F.FLOWER.stemHeight * 0.55, camera.target[2]];
+    const dist = 0.8;
     const eye = [
-      camera.target[0] + sunDir[0] * 0.45,
-      sunDir[1] * 0.45,
-      camera.target[2] + sunDir[2] * 0.45,
+      centre[0] + sunDir[0] * dist,
+      centre[1] + sunDir[1] * dist,
+      centre[2] + sunDir[2] * dist,
     ];
-    const sunView = lookAt(mat4(), eye, [camera.target[0], 0.2, camera.target[2]], [0, 1, 0]);
+    const sunView = lookAt(mat4(), eye, centre, [0, 1, 0]);
     const sunProj = ortho(mat4(), HALF, HALF, NEAR, FAR);
     const sunViewProj = multiply(mat4(), sunProj, sunView);
 
@@ -621,7 +632,7 @@ export class Renderer {
     g.set([state.bloom, state.floretFront, state.exposure, dt], G.state);
     g.set([this.width, this.height, 1 / this.width, 1 / this.height], G.screen);
     g.set([HALF, FAR - NEAR, 0, 0.0016], G.shadowParam);
-    g.set([F.FLOWER.stemHeight, this.stemSegment, 1.0, 0], G.plant);
+    g.set([F.FLOWER.stemHeight, this.stemSegment, 1.0, state.debugView ?? 0], G.plant);
 
     const { A, B } = camera.depthParams;
     g.set([camera.near, camera.far, A, B], G.proj);
@@ -750,5 +761,84 @@ export class Renderer {
     fullscreen('post', P.post, this.bgPost, this.context.getCurrentTexture().createView());
 
     device.queue.submit([encoder.finish()]);
+  }
+
+  /**
+   * Read a block of the HDR target back to the CPU and summarise it.
+   *
+   * A black frame is otherwise indistinguishable between "the main pass drew
+   * nothing", "it drew something the post chain then discarded" and "it drew
+   * something too dark to see". Actual numbers out of the HDR target separate
+   * those three in one step, which is worth a stall when the alternative is a
+   * round trip per guess.
+   */
+  async probeHDR(size = 128) {
+    const { device } = this;
+    const w = Math.min(size, this.width), h = Math.min(size, this.height);
+    // copyTextureToBuffer needs bytesPerRow aligned to 256; rgba16float is 8B.
+    const rowBytes = Math.ceil((w * 8) / 256) * 256;
+    const buffer = device.createBuffer({
+      size: rowBytes * h,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = device.createCommandEncoder({ label: 'probe' });
+    enc.copyTextureToBuffer(
+      { texture: this.hdrTexture,
+        origin: { x: (this.width - w) >> 1, y: (this.height - h) >> 1 } },
+      { buffer, bytesPerRow: rowBytes, rowsPerImage: h },
+      { width: w, height: h },
+    );
+    device.queue.submit([enc.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const view = new DataView(buffer.getMappedRange());
+
+    const half = (u) => {
+      const s = (u & 0x8000) >> 15, e = (u & 0x7c00) >> 10, f = u & 0x03ff;
+      if (e === 0) return (s ? -1 : 1) * 2 ** -14 * (f / 1024);
+      if (e === 31) return f ? NaN : (s ? -Infinity : Infinity);
+      return (s ? -1 : 1) * 2 ** (e - 15) * (1 + f / 1024);
+    };
+
+    let min = Infinity, max = -Infinity, sum = 0, n = 0, nan = 0;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const o = y * rowBytes + x * 8;
+        for (let c = 0; c < 3; c++) {
+          const v = half(view.getUint16(o + c * 2, true));
+          if (Number.isNaN(v)) { nan++; continue; }
+          min = Math.min(min, v); max = Math.max(max, v); sum += v; n++;
+        }
+      }
+    }
+    buffer.unmap();
+    buffer.destroy();
+    return {
+      min: n ? min : 0, max: n ? max : 0, mean: n ? sum / n : 0,
+      nanFraction: nan / (w * h * 3), samples: w * h,
+    };
+  }
+
+  /** Read back the stem chain the compute pass solved. */
+  async probeStem() {
+    const { device } = this;
+    const bytes = 16 * 16 * 4;
+    const dst = device.createBuffer({
+      size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const enc = device.createCommandEncoder({ label: 'probeStem' });
+    enc.copyBufferToBuffer(this.stemBuffer, 0, dst, 0, bytes);
+    device.queue.submit([enc.finish()]);
+    await dst.mapAsync(GPUMapMode.READ);
+    const f = new Float32Array(dst.getMappedRange()).slice();
+    dst.unmap(); dst.destroy();
+    const nodes = [];
+    for (let i = 0; i < 16; i++) {
+      const o = i * 16;
+      nodes.push({
+        pos: [f[o], f[o + 1], f[o + 2]].map((v) => +v.toFixed(4)),
+        axis: [f[o + 8], f[o + 9], f[o + 10]].map((v) => +v.toFixed(3)),
+      });
+    }
+    return { finite: f.every(Number.isFinite), first: nodes[0], last: nodes[15] };
   }
 }
