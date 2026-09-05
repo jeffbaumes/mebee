@@ -15,6 +15,25 @@ not from the WebGPU path (see Verification).
 
 ![leaf](docs/leaf.png)
 
+## Deploy
+
+A GitHub Actions workflow (`.github/workflows/pages.yml`) builds and publishes
+the site on every push to `main`. It is already committed and already ran.
+
+**It needs one manual step first: the repository has to be public.** GitHub
+Pages is only available for private repositories on a paid plan, so on GitHub
+Free the deploy fails at `actions/configure-pages` until visibility changes.
+
+1. Settings -> General -> Danger Zone -> **Change repository visibility** ->
+   Make public.
+2. Re-run the failed job (Actions -> *Deploy to GitHub Pages* -> **Re-run all
+   jobs**), or just push anything to `main`.
+
+The site then lands at <https://jeffbaumes.github.io/mebee/>. Nothing else needs
+configuring — `configure-pages` runs with `enablement: true`, so it switches
+Pages on itself; the shader loader resolves paths against its own module URL,
+so the project subpath works.
+
 ## Run it
 
 Plain static files, no build step. Serve the directory over HTTP (WebGPU needs
@@ -25,7 +44,8 @@ npx http-server . -p 8080     # or: python3 -m http.server 8080
 ```
 
 Then open <http://localhost:8080/>. Needs Chrome/Edge 113+, Safari 26+, or
-Firefox with WebGPU enabled.
+Firefox with WebGPU enabled. HTTPS or `localhost` is required either way —
+WebGPU only exists in a secure context.
 
 Drag to orbit, wheel or pinch to zoom. The panel exposes the shader variables
 that drive the scene: sun elevation, wind, petal unfurl, the floret maturation
