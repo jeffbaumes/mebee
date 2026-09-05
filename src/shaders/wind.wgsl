@@ -42,8 +42,10 @@ fn windAt(p: vec3f, t: f32) -> vec3f {
 
 @compute @workgroup_size(16)
 fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
+  // No early return: the workgroup size equals STEM_NODES exactly, and a
+  // conditional return here would put every workgroupBarrier below into
+  // non-uniform control flow.
   let i = lid.x;
-  if (i >= STEM_NODES) { return; }
 
   let dt = clamp(G.state.w, 1.0 / 240.0, 1.0 / 30.0);
   let restH = f32(i) / f32(STEM_NODES - 1u);

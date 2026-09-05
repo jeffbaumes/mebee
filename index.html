@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>mebee - macro flower prototype</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ctext y=%2714%27 font-size=%2714%27%3E%F0%9F%8C%BC%3C/text%3E%3C/svg%3E">
+<style>
+  :root { color-scheme: dark; --panel: rgba(14,16,18,0.82); --line: rgba(255,255,255,0.13); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d0f;
+    font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #e8e6e3; }
+  #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  #hud { position: fixed; inset: 0; pointer-events: none; }
+  #fps { position: absolute; top: env(safe-area-inset-top, 10px); left: 12px;
+    font-variant-numeric: tabular-nums; font-size: 11px; color: #9aa0a6;
+    text-shadow: 0 1px 3px #000; }
+
+  #panel { position: absolute; top: 8px; right: 8px; width: 244px; max-height: calc(100% - 16px);
+    overflow-y: auto; background: var(--panel); backdrop-filter: blur(14px);
+    border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px 12px;
+    pointer-events: auto; }
+  #panel.collapsed .rows { display: none; }
+  #panel header { display: flex; align-items: center; justify-content: space-between;
+    font-weight: 600; letter-spacing: .02em; margin-bottom: 8px; }
+  #panel-toggle { background: none; border: 1px solid var(--line); color: inherit;
+    border-radius: 6px; width: 24px; height: 24px; cursor: pointer; font-size: 14px; line-height: 1; }
+  .group { margin-top: 10px; font-size: 10px; text-transform: uppercase;
+    letter-spacing: .09em; color: #8d949b; border-top: 1px solid var(--line); padding-top: 8px; }
+  .row { display: grid; grid-template-columns: 1fr auto; align-items: center;
+    gap: 4px 8px; margin: 7px 0; }
+  .row label { font-size: 12px; color: #c8ccd0; }
+  .row output { font-size: 11px; color: #8d949b; font-variant-numeric: tabular-nums; }
+  .row input[type=range] { grid-column: 1 / -1; width: 100%; margin: 0; accent-color: #d98cae; }
+  .row.check { grid-template-columns: auto 1fr; }
+
+  #loading, #error { position: absolute; inset: 0; display: grid; place-content: center;
+    text-align: center; gap: 8px; padding: 24px; pointer-events: auto; background: #0b0d0f; }
+  #error h2 { margin: 0; font-size: 15px; color: #f0b0b0; font-weight: 600; }
+  #error p { margin: 0; max-width: 34rem; color: #9aa0a6; font-size: 12.5px; }
+  .spin { width: 22px; height: 22px; border: 2px solid #333; border-top-color: #d98cae;
+    border-radius: 50%; margin: 0 auto; animation: s 0.8s linear infinite; }
+  @keyframes s { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud">
+  <div id="fps"></div>
+
+  <div id="panel">
+    <header>Flower <button id="panel-toggle" title="Collapse">-</button></header>
+    <div class="rows">
+
+      <div class="group">Light &amp; air</div>
+      <div class="row">
+        <label for="sunElevation">Sun elevation</label><output id="sunElevation-val"></output>
+        <input type="range" id="sunElevation" min="0.03" max="1.45" step="0.005" value="0.30">
+      </div>
+      <div class="row">
+        <label for="wind">Wind</label><output id="wind-val"></output>
+        <input type="range" id="wind" min="0" max="2.0" step="0.01" value="0.55">
+      </div>
+
+      <div class="group">Bloom state</div>
+      <div class="row">
+        <label for="bloom">Petal unfurl</label><output id="bloom-val"></output>
+        <input type="range" id="bloom" min="0" max="1" step="0.005" value="1">
+      </div>
+      <div class="row">
+        <label for="floretFront">Floret front</label><output id="floretFront-val"></output>
+        <input type="range" id="floretFront" min="0" max="1" step="0.005" value="0.35">
+      </div>
+      <div class="row check">
+        <input type="checkbox" id="animate" checked>
+        <label for="animate">Animate maturation</label>
+      </div>
+
+      <div class="group">Lens</div>
+      <div class="row">
+        <label for="fNumber">Aperture f/</label><output id="fNumber-val"></output>
+        <input type="range" id="fNumber" min="1.4" max="16" step="0.1" value="4">
+      </div>
+      <div class="row">
+        <label for="focalLength">Focal length (m)</label><output id="focalLength-val" data-digits="3"></output>
+        <input type="range" id="focalLength" min="0.028" max="0.135" step="0.001" value="0.055" data-digits="3">
+      </div>
+
+      <div class="group">Grade</div>
+      <div class="row">
+        <label for="exposure">Exposure</label><output id="exposure-val"></output>
+        <input type="range" id="exposure" min="0.2" max="3" step="0.01" value="1">
+      </div>
+      <div class="row">
+        <label for="bloomStrength">Lens flare</label><output id="bloomStrength-val" data-digits="3"></output>
+        <input type="range" id="bloomStrength" min="0" max="0.3" step="0.002" value="0.055" data-digits="3">
+      </div>
+      <div class="row">
+        <label for="chromatic">Chromatic ab.</label><output id="chromatic-val" data-digits="4"></output>
+        <input type="range" id="chromatic" min="0" max="0.012" step="0.0002" value="0.0022" data-digits="4">
+      </div>
+      <div class="row">
+        <label for="grain">Grain</label><output id="grain-val" data-digits="3"></output>
+        <input type="range" id="grain" min="0" max="0.09" step="0.001" value="0.020" data-digits="3">
+      </div>
+      <div class="row">
+        <label for="renderScale">Render scale</label><output id="renderScale-val"></output>
+        <input type="range" id="renderScale" min="0.4" max="1.0" step="0.05" value="1.0">
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<div id="loading"><div class="spin"></div><p>Growing the flower…</p></div>
+
+<div id="error" hidden>
+  <h2 id="error-msg"></h2>
+  <p id="error-detail"></p>
+</div>
+
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

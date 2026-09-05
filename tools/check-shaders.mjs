@@ -13,6 +13,7 @@ export function resolveIncludes(file, seen = new Set()) {
     (_, inc) => resolveIncludes(inc, seen));
 }
 
+function main() {
 let fail = 0;
 const files = fs.readdirSync(DIR).filter(f => f.endsWith('.wgsl')).sort();
 for (const f of files) {
@@ -32,3 +33,7 @@ for (const f of files) {
 }
 console.log(fail ? `\n${fail} shader(s) failed to parse` : `\nall ${files.length} shaders parsed`);
 process.exit(fail ? 1 : 0);
+}
+
+// Only run when invoked directly; check-bindings.mjs imports resolveIncludes.
+if (process.argv[1] && import.meta.url === `file://${path.resolve(process.argv[1])}`) main();

@@ -35,7 +35,11 @@ fn fs(i: VOut) -> @location(0) vec4f {
   let centred = uv - vec2f(0.5);
   let r2 = dot(centred, centred);
 
-  let d = textureLoad(depthTex, vec2i(uv * G.screen.xy), 0);
+  // Clamp: at uv == 1 the scaled coordinate lands one texel past the edge, and
+  // an out-of-bounds textureLoad returns zero -- which reads as "at the near
+  // plane" and would put a sharp seam along the last row and column.
+  let dc = clamp(vec2i(uv * G.screen.xy), vec2i(0), vec2i(G.screen.xy) - vec2i(1));
+  let d = textureLoad(depthTex, dc, 0);
   let coc = abs(signedCoC(linearDepth(d)));
   let blend = smoothstep(0.5, 2.2, coc);
 

@@ -29,6 +29,7 @@ struct Globals {
 
 const PI       = 3.14159265359;
 const GOLDEN   = 2.39996323;   // golden angle in radians
+const MAX_COC  = 48.0;         // full-res pixels
 
 // ---------------------------------------------------------------------------
 // Hashing and noise
@@ -191,12 +192,17 @@ fn shadowFactor(worldPos: vec3f, ndl: f32) -> f32 {
   let phi = hash21(worldPos.xz * 811.0) * 2.0 * PI;
 
   // --- blocker search ---
+  // textureLoad, not textureSampleLevel: sampling a depth texture needs a
+  // non-filtering sampler, and the only one bound here filters. Point sampling
+  // is what a blocker search wants anyway.
   let searchRadius = 7.0 * texel.x;
   var blockerDepth = 0.0;
   var blockers = 0.0;
   for (var i = 0u; i < 12u; i++) {
     let o = vogelDisk(i, 12u, phi) * searchRadius;
-    let d = textureSampleLevel(shadowMap, linearSamp, uv + o, 0.0);
+    let c = vec2i((uv + o) * dims);
+    let cc = clamp(c, vec2i(0), vec2i(dims) - vec2i(1));
+    let d = textureLoad(shadowMap, cc, 0);
     if (d < depth - bias) { blockerDepth += d; blockers += 1.0; }
   }
   if (blockers < 0.5) { return 1.0; }
@@ -211,7 +217,9 @@ fn shadowFactor(worldPos: vec3f, ndl: f32) -> f32 {
   var sum = 0.0;
   for (var i = 0u; i < 20u; i++) {
     let o = vogelDisk(i, 20u, phi) * radius;
-    sum += textureSampleCompare(shadowMap, shadowCmp, uv + o, depth - bias);
+    // Compare*Level*: the plain form demands uniform control flow, which the
+    // early-out above already broke.
+    sum += textureSampleCompareLevel(shadowMap, shadowCmp, uv + o, depth - bias);
   }
   return sum / 20.0;
 }
@@ -293,5 +301,8 @@ fn signedCoC(viewDepth: f32) -> f32 {
   // Thin-lens CoC on the sensor, converted to pixels.
   let cocSensor = aperture * focal * (viewDepth - focus) /
                   max(1e-6, viewDepth * (focus - focal));
-  return cocSensor / sensorH * G.screen.y;
+  // Clamp: a genuine macro CoC runs to hundreds of pixels a few centimetres
+  // behind the subject, which no finite-tap gather can cover. Past this the
+  // disc is already featureless, so the clamp costs nothing visible.
+  return clamp(cocSensor / sensorH * G.screen.y, -MAX_COC, MAX_COC);
 }

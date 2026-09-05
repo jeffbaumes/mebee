@@ -299,6 +299,14 @@ function closeAreoles(nodes, linkRadius) {
 /** How far past its radius a vein's ridge still raises the surface. */
 const RIDGE_REACH = 2.4;
 
+/**
+ * Distance over which the sunken areole floor recovers to full brightness.
+ * Sized to a real areole (~0.02 of the leaf's length) rather than an arbitrary
+ * larger radius: matching it both sharpens the cavity shading and shrinks the
+ * bake's candidate lists, since this value sets the spatial grid's padding.
+ */
+const AO_RANGE = 0.018;
+
 /** Flatten tree edges and areole links into one segment list. */
 function buildSegments(nodes, links) {
   const segs = [];
@@ -334,7 +342,9 @@ function buildSegmentGrid(segs, cells, minRadius) {
   for (let i = 0; i < segs.length; i++) {
     const sg = segs[i];
     // Full ridge reach, floored so the cavity-AO falloff also stays continuous.
-    const pad = Math.max(Math.max(minRadius, sg.radius) * RIDGE_REACH, 0.032);
+    // The floor dominates the cost: every segment gets stamped into every cell
+    // within it, so widening it multiplies the per-texel candidate list.
+    const pad = Math.max(Math.max(minRadius, sg.radius) * RIDGE_REACH, AO_RANGE + 0.002);
     const x0 = Math.floor((Math.min(sg.ax, sg.bx) - pad + 0.5) * cells);
     const x1 = Math.floor((Math.max(sg.ax, sg.bx) + pad + 0.5) * cells);
     const y0 = Math.floor((Math.min(sg.ay, sg.by) - pad) * cells);
@@ -353,11 +363,11 @@ function segDist2(px, py, ax, ay, bx, by) {
   return (px - (ax + t * dx)) ** 2 + (py - (ay + t * dy)) ** 2;
 }
 
-export function bakeLeafMaps(ven, size = 1024, opts = {}) {
+export function bakeLeafMaps(ven, size = 512, opts = {}) {
   const { seed = 3, holes = 2, ridgeGain = 1.0 } = opts;
   const { nodes, shape, links } = ven;
   const rng = makeRng(seed + 991);
-  const cells = 96;
+  const cells = 128;
   const segs = buildSegments(nodes, links);
   // Below about a texel the ridge stops resolving and just aliases into
   // sparkle. Widen the finest veins to that floor, but fade their amplitude
@@ -406,6 +416,16 @@ export function bakeLeafMaps(ven, size = 1024, opts = {}) {
         biteProximity = Math.max(biteProximity, 1 - Math.min(1, Math.abs(d - r) / 0.030));
       }
 
+      // Texels well outside the blade are never shaded -- the alpha cutout
+      // drops them -- so skip the segment search there. Keep a few texels of
+      // slack so mip generation has real data to blend at the margin.
+      const slack = 8 / size;
+      if (Math.abs(lx) > margin + slack || ly < -slack || ly > 1 + slack) {
+        detailMap[o + 1] = 255 * fbm2(lx * 26 + 11, ly * 26, 4, 2.0, 0.55, seed);
+        detailMap[o + 3] = 255;
+        continue;
+      }
+
       // --- vein height field ---
       // Take the maximum ridge contribution over every nearby segment rather
       // than the profile of the single nearest one. A ridge height field is a
@@ -448,7 +468,7 @@ export function bakeLeafMaps(ven, size = 1024, opts = {}) {
       }
       // Areoles sit slightly sunken between veins -> soft cavity occlusion.
       const ao = nearestD2 < 1e8
-        ? 0.72 + 0.28 * Math.min(1, Math.sqrt(nearestD2) / 0.05)
+        ? 0.72 + 0.28 * Math.min(1, Math.sqrt(nearestD2) / AO_RANGE)
         : 1;
 
       const mottle = fbm2(lx * 26 + 11, ly * 26, 4, 2.0, 0.55, seed);
