@@ -224,10 +224,12 @@ export function buildDiscFloretMesh() {
     return [Math.cos(th) * r, y, Math.sin(th) * r];
   };
 
-  sampleSurface(mb, corolla(1), 9, 21, {
+  // Around a millimetre across on screen: a denser grid buys nothing, and it
+  // is multiplied by every instance on the disc.
+  sampleSurface(mb, corolla(1), 7, 15, {
     bud: corolla(0), uv: (u, v) => [v, u], axis: (u) => u, variant: 0,
   });
-  sampleSurface(mb, style(1), 7, 9, {
+  sampleSurface(mb, style(1), 5, 7, {
     bud: style(0), uv: (u, v) => [v, u], axis: (u) => u, variant: 1,
   });
   return mb.finish();

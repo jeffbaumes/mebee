@@ -44,11 +44,16 @@ export class MeshBuilder {
   quad(a, b, c, d) { this.tri(a, b, c); this.tri(a, c, d); }
 
   /**
-   * Stitch a (nu x nv) vertex grid, both faces. Plant laminae are two-sided:
-   * a petal seen from beneath must not vanish, and the shader needs the real
-   * facing to flip the normal for transmission.
+   * Stitch a (nu x nv) vertex grid.
+   *
+   * Plant laminae are two-sided -- a petal seen from beneath must not vanish --
+   * but that is a rasteriser state, not a geometry property: the pipelines do
+   * not cull, and the fragment shaders flip the normal by `front_facing` for
+   * transmission. Emitting each quad twice therefore doubles the triangle
+   * count for no visible difference, so `doubleSided` defaults off and exists
+   * only for the rare surface that genuinely needs duplicated winding.
    */
-  gridIndices(base, nu, nv, doubleSided = true) {
+  gridIndices(base, nu, nv, doubleSided = false) {
     for (let i = 0; i < nu - 1; i++) {
       for (let j = 0; j < nv - 1; j++) {
         const a = base + i * nv + j, b = a + nv, c = b + 1, d = a + 1;
@@ -125,6 +130,6 @@ export function sampleSurface(mb, fn, nu, nv, meta = {}) {
       });
     }
   }
-  mb.gridIndices(base, nu, nv, meta.doubleSided !== false);
+  mb.gridIndices(base, nu, nv, meta.doubleSided === true);
   return base;
 }

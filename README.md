@@ -7,6 +7,12 @@ from modelling more geometry.
 Everything is procedural. There are no art assets — no meshes, no textures, no
 scans. The flower is grown from botanical rules at load time.
 
+![flower](docs/flower.png)
+
+About 109k triangles: 18k for the plant, 91k across 420 instanced disc florets.
+Both previews above are from the offline software rasteriser in `tools/`,
+not from the WebGPU path (see Verification).
+
 ![leaf](docs/leaf.png)
 
 ## Run it
