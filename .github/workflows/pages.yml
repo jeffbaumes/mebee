@@ -38,6 +38,11 @@ jobs:
           mkdir -p _site
           cp index.html _site/
           cp -r src docs _site/
+          # Stamp the commit sha so each deploy fetches its own shaders rather
+          # than whatever the CDN still holds from the previous one.
+          SHA="${GITHUB_SHA::7}"
+          sed -i "s/window.__BUILD__ = \"dev\"/window.__BUILD__ = \"$SHA\"/; s#main.js?v=dev#main.js?v=$SHA#" _site/index.html
+          grep -q "$SHA" _site/index.html || { echo "build stamp not applied"; exit 1; }
           # Skip Jekyll entirely: it is not needed for a static bundle and it
           # silently drops paths it considers special.
           touch _site/.nojekyll

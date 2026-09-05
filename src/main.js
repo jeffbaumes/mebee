@@ -144,6 +144,8 @@ function resizeCanvas() {
 
   bindInput();
   bindControls();
+  document.getElementById('build').textContent =
+    `build ${globalThis.__BUILD__ ?? 'dev'}`;
   document.getElementById('loading').hidden = true;
 
   let last = performance.now();

@@ -16,6 +16,8 @@
   #fps { position: absolute; top: env(safe-area-inset-top, 10px); left: 12px;
     font-variant-numeric: tabular-nums; font-size: 11px; color: #9aa0a6;
     text-shadow: 0 1px 3px #000; }
+  #build { position: absolute; bottom: 8px; left: 12px; font-size: 10px;
+    color: #6b7176; text-shadow: 0 1px 3px #000; font-variant-numeric: tabular-nums; }
 
   #panel { position: absolute; top: 8px; right: 8px; width: 244px; max-height: calc(100% - 16px);
     overflow-y: auto; background: var(--panel); backdrop-filter: blur(14px);
@@ -49,6 +51,7 @@
 
 <div id="hud">
   <div id="fps"></div>
+  <div id="build"></div>
 
   <div id="panel">
     <header>Flower <button id="panel-toggle" title="Collapse">-</button></header>
@@ -121,6 +124,10 @@
   <p id="error-detail"></p>
 </div>
 
-<script type="module" src="./src/main.js"></script>
+<!-- BUILD is rewritten to the commit sha when the site is staged for
+     deployment. It cache-busts the entry script and every shader fetch, and
+     is shown in the HUD so a stale bundle is visible rather than mysterious. -->
+<script>window.__BUILD__ = "dev";</script>
+<script type="module" src="./src/main.js?v=dev"></script>
 </body>
 </html>

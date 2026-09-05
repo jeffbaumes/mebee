@@ -34,9 +34,14 @@ export async function initWebGPU(canvas) {
  */
 export async function makeShaderLoader(base = new URL('../shaders/', import.meta.url).href) {
   const cache = new Map();
+  // Cache-bust with the build stamp: GitHub Pages serves assets with a ten
+  // minute max-age, so without this a fresh deploy can be served alongside
+  // shaders from the previous one.
+  const version = globalThis.__BUILD__ && globalThis.__BUILD__ !== 'dev'
+    ? `?v=${globalThis.__BUILD__}` : '';
   const fetchOnce = (name) => {
     if (!cache.has(name)) {
-      cache.set(name, fetch(base + name).then((r) => {
+      cache.set(name, fetch(base + name + version).then((r) => {
         if (!r.ok) throw new Error(`shader ${name}: ${r.status}`);
         return r.text();
       }));
