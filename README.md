@@ -1,5 +1,7 @@
 # mebee
 
+**Live: <https://jeffbaumes.github.io/mebee/>** (needs a WebGPU browser and a real GPU)
+
 A WebGPU macro-scale flower, built to test one claim: that photographic realism
 at insect scale comes mostly from **simulating the camera and the light**, not
 from modelling more geometry.
@@ -29,6 +31,9 @@ integration tokens.
 1. **Settings -> Pages -> Build and deployment -> Source -> "GitHub Actions"**
    (<https://github.com/jeffbaumes/mebee/settings/pages>)
 2. Re-run the workflow, or push anything to `main`.
+
+That has been done for this repository, so pushes to `main` now publish on
+their own.
 
 The repository also has to be public, unless the account is on a paid plan --
 GitHub Pages is not available for private repositories on GitHub Free.
