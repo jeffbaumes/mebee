@@ -45,9 +45,9 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
 
   // Frame with +Y along the dome normal.
   let up = normalize(inst.nrmRad.xyz);
-  var ref = vec3f(0.0, 0.0, 1.0);
-  if (abs(up.z) > 0.9) { ref = vec3f(1.0, 0.0, 0.0); }
-  let xa = normalize(cross(ref, up));
+  var refDir = vec3f(0.0, 0.0, 1.0);
+  if (abs(up.z) > 0.9) { refDir = vec3f(1.0, 0.0, 0.0); }
+  let xa = normalize(cross(refDir, up));
   let za = cross(up, xa);
 
   let scaled = localRest * inst.posScale.w;

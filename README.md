@@ -118,7 +118,12 @@ tools/                offline verification (see below)
 This was developed in a container with no GPU, so the runtime has **never been
 executed**. Compensating for that, the parts that could be checked offline were:
 
-- `tools/check-shaders.mjs` — parses all 13 WGSL files (syntax only, not types).
+- `tools/validate-shaders.mjs` — runs every shader through **naga**, the
+  compiler wgpu uses: full type checking, uniformity analysis and reserved-word
+  rules. This is the check that matters; run `npm install && npm run check`.
+- `tools/check-shaders.mjs` — a faster parse-only pass with no native
+  dependency. It does *not* catch type errors or reserved words, which is
+  exactly how `var ref = ...` reached a real driver before naga was added.
 - `tools/check-bindings.mjs` — cross-checks every `@group`/`@binding` in the
   shaders against the bind group layouts in `renderer.js`.
 - The `Globals` uniform offsets in `renderer.js` are cross-checked field by
@@ -130,10 +135,10 @@ executed**. Compensating for that, the parts that could be checked offline were:
 - A headless-browser smoke test confirms every module loads, all shader
   `//!include`s resolve, and the no-WebGPU path fails gracefully.
 
-**What that does not cover:** nothing has been through a real driver. Expect to
-fix pipeline validation errors, and expect the lighting constants
-(`sunIntensity`, exposure, material response) to need a tuning pass against an
-actual image.
+**What that does not cover:** naga is spec-conformant but is not the same
+compiler Chrome ships (Tint), and no amount of static checking says whether the
+image looks right. Expect the lighting constants (`sunIntensity`, exposure,
+material response) to need a tuning pass against an actual render.
 
 ## Known gaps
 

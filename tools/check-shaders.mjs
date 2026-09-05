@@ -1,7 +1,14 @@
 // Parse every WGSL file (after resolving //!include) and report syntax errors.
 import fs from 'node:fs';
 import path from 'node:path';
-import { WgslReflect } from '/tmp/claude-0/-home-user-mebee/4b8f0ee9-8a7a-5db3-91d9-0b1867ae71e5/scratchpad/val/node_modules/wgsl_reflect/wgsl_reflect.module.js';
+import { createRequire } from 'node:module';
+
+// Resolved through node_modules rather than an absolute path so the check runs
+// anywhere. Note this only PARSES -- use tools/validate-shaders.mjs for real
+// validation; wgsl_reflect happily accepts reserved words and type errors.
+const require = createRequire(import.meta.url);
+const { WgslReflect } = await import(
+  require.resolve('wgsl_reflect/wgsl_reflect.module.js'));
 
 const DIR = 'src/shaders';
 export function resolveIncludes(file, seen = new Set()) {

@@ -88,8 +88,8 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     if (i >= 2u && i < STEM_NODES) {
       let a = wsPos[i - 2u];
       let b = wsPos[i - 1u];
-      let target = b + normalize(b - a) * segLen;
-      wsPos[i] = mix(wsPos[i], target, 0.28);
+      let straight = b + normalize(b - a) * segLen;
+      wsPos[i] = mix(wsPos[i], straight, 0.28);
     }
     workgroupBarrier();
   }
@@ -107,7 +107,7 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   // Serial on one thread: 16 nodes, and transporting a reference vector along
   // the chain is what stops the frame from spinning about the stem axis.
   if (i == 0u) {
-    var ref = vec3f(1.0, 0.0, 0.0);
+    var refDir = vec3f(1.0, 0.0, 0.0);
     for (var k = 0u; k < STEM_NODES; k++) {
       var axis: vec3f;
       if (k + 1u < STEM_NODES) {
@@ -115,10 +115,10 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
       } else {
         axis = normalize(wsPos[k] - wsPos[k - 1u]);
       }
-      var side = ref - axis * dot(ref, axis);
+      var side = refDir - axis * dot(refDir, axis);
       if (length(side) < 1e-4) { side = vec3f(0.0, 0.0, 1.0) - axis * dot(vec3f(0.0, 0.0, 1.0), axis); }
       side = normalize(side);
-      ref = side;
+      refDir = side;
       stemNodes[k].axis = vec4f(axis, 0.0);
       stemNodes[k].side = vec4f(side, 0.0);
     }
