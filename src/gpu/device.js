@@ -24,8 +24,15 @@ export async function initWebGPU(canvas) {
   return { adapter, device, context, format };
 }
 
-/** Resolve `//!include` directives at load time; mirrors tools/check-shaders. */
-export async function makeShaderLoader(base = './src/shaders/') {
+/**
+ * Resolve `//!include` directives at load time; mirrors tools/check-shaders.
+ *
+ * The default base is resolved against this module's own URL rather than left
+ * as a document-relative path: `fetch` resolves relative URLs against the page,
+ * so a document-relative default breaks as soon as the site is served from a
+ * subpath (GitHub Pages project sites) or the page sets a <base>.
+ */
+export async function makeShaderLoader(base = new URL('../shaders/', import.meta.url).href) {
   const cache = new Map();
   const fetchOnce = (name) => {
     if (!cache.has(name)) {
