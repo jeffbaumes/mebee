@@ -22,7 +22,7 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   let restH = f32(i) / f32(STEM_NODES - 1u);
   let segLen = G.plant.y;
 
-  // EXACTLY one step per frame, of the length the host hands us in plant.z.
+  // EXACTLY one step per frame, of the length the host hands us in state.w.
   //
   // Two rules, both learned the hard way and both checked by tools/sim-stem.mjs:
   //
@@ -39,8 +39,10 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   // time explodes -- 49mm per frame, buzzing at 9.5Hz, even with the standard
   // dt/dtPrev correction, because the constraint projection breaks the
   // invariant that correction relies on. The host therefore snaps the step to
-  // a standard refresh interval and holds it there.
-  let h = G.plant.z;
+  // a standard refresh interval and holds it there. The same step drives the
+  // pollen and advances windParams.y, so nothing in the scene runs on a
+  // different clock from the plant it is blowing through.
+  let h = G.state.w;
 
   var node = stemNodes[i];
   var pos = node.pos.xyz;

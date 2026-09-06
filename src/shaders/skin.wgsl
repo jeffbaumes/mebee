@@ -56,6 +56,11 @@ struct Skinned { pos: vec3f, nrm: vec3f, tan: vec3f }
  */
 fn laminaFlex(fr: Frame, local: vec3f, axis: f32, variant: f32) -> vec3f {
   if (axis <= 0.0) { return vec3f(0.0); }
+  // The simulation clock, not wall time. Nothing here is integrated -- the
+  // offset is read straight off `t` -- so the petal goes exactly where the
+  // clock says, instantly and at full amplitude. Driven by wall time a 50ms
+  // frame moved every petal at once by 4.6x its usual step, which is the jump
+  // you could see in a gust; on the solver's own step there is no such frame.
   let t = G.windParams.y;
   let wind = windAt(fr.origin, t);
   let speed = length(wind);

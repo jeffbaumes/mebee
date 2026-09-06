@@ -13,11 +13,11 @@ struct Globals {
   shL1z       : vec4f,
   shL1x       : vec4f,
   lens        : vec4f,   // focusDistance, fNumber, focalLength, sensorHeight
-  windParams  : vec4f,   // strength, time, dirX, dirZ
-  state       : vec4f,   // bloom, floretFront, exposure, dt
+  windParams  : vec4f,   // strength, simTime, dirX, dirZ
+  state       : vec4f,   // bloom, floretFront, exposure, solveStep
   screen      : vec4f,   // w, h, 1/w, 1/h
   shadowParam : vec4f,   // orthoHalfWidth, depthRange, unused, bias
-  plant       : vec4f,   // stemLength, stemSegmentLength, solveStep, debugView
+  plant       : vec4f,   // stemLength, stemSegmentLength, unused, debugView
   proj        : vec4f,   // near, far, A, B  (ndcZ = A + B/viewDist)
   post        : vec4f,   // bloomStrength, grainAmount, chromatic, vignette
 }

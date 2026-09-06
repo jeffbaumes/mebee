@@ -176,6 +176,11 @@ export class Renderer {
     // is. See updateSolveStep, and tools/sim-stem.mjs for the measurements.
     this.frameAvg = 1 / 60;
     this.solveStep = 1 / 60;
+    // The simulation's own clock, advanced by the solver's step rather than by
+    // wall time. EVERYTHING wind-driven reads this -- the stem solve, the petal
+    // and leaf flex, the grass, the pollen -- so they cannot disagree, and a
+    // frame that took 50ms cannot jump any of them forward 50ms.
+    this.simTime = 0;
 
     // Pollen motes, seeded through the volume around the flower.
     const motes = new Float32Array(POLLEN_COUNT * 8);
@@ -655,6 +660,7 @@ export class Renderer {
         this.solveStep = rung;
       }
     }
+    this.simTime += this.solveStep;
   }
 
   updateGlobals(camera, state, dt) {
@@ -702,11 +708,11 @@ export class Renderer {
     g.set([...sh[3], 0], G.shL1x);
 
     g.set([camera.focusDistance, camera.fNumber, camera.focalLength, 0.024], G.lens);
-    g.set([state.wind, state.time, Math.cos(state.windDir), Math.sin(state.windDir)], G.windParams);
-    g.set([state.bloom, state.floretFront, state.exposure, dt], G.state);
+    g.set([state.wind, this.simTime, Math.cos(state.windDir), Math.sin(state.windDir)], G.windParams);
+    g.set([state.bloom, state.floretFront, state.exposure, this.solveStep], G.state);
     g.set([this.width, this.height, 1 / this.width, 1 / this.height], G.screen);
     g.set([HALF, FAR - NEAR, 0, 0.0016], G.shadowParam);
-    g.set([F.FLOWER.stemHeight, this.stemSegment, this.solveStep, state.debugView ?? 0], G.plant);
+    g.set([F.FLOWER.stemHeight, this.stemSegment, 0, state.debugView ?? 0], G.plant);
 
     const { A, B } = camera.depthParams;
     g.set([camera.near, camera.far, A, B], G.proj);
