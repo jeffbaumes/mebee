@@ -29,6 +29,12 @@ export class MacroCamera {
     this.near = 0.01;
     this.far = 12.0;
 
+    // 'orbit' inspects the flower; 'fly' is the first-person bee.
+    this.mode = 'orbit';
+    this.flyPosition = [0, 0.4, 0.3];
+    this.flyForward = [0, 0, -1];
+    this.subject = [0, 0.40, 0];      // what the lens focuses on
+
     this.view = mat4();
     this.proj = mat4();
     this.viewProj = mat4();
@@ -76,7 +82,15 @@ export class MacroCamera {
   /** Hand framing back to the automatic fit. */
   resetFraming() { this.userAdjusted = false; }
 
+  /** Drive the camera from the flight model. */
+  setFly(position, forward) {
+    this.mode = 'fly';
+    this.flyPosition = position;
+    this.flyForward = forward;
+  }
+
   update(aspect) {
+    if (this.mode === 'fly') return this.updateFly(aspect);
     const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
     this.position = [
       this.target[0] + Math.sin(this.yaw) * cp * this.distance,
@@ -88,6 +102,31 @@ export class MacroCamera {
     if (this.autoFocus) this.focusDistance = this.distance;
 
     lookAt(this.view, this.position, this.target, [0, 1, 0]);
+    perspective(this.proj, this.fovY, aspect, this.near, this.far);
+    multiply(this.viewProj, this.proj, this.view);
+    invert(this.invViewProj, this.viewProj);
+    return this;
+  }
+
+  updateFly(aspect) {
+    this.position = this.flyPosition;
+    const at = [
+      this.position[0] + this.flyForward[0],
+      this.position[1] + this.flyForward[1],
+      this.position[2] + this.flyForward[2],
+    ];
+    // Focus on the flower rather than a fixed distance ahead: it is the only
+    // subject in the scene, and holding focus on it is what a photographer --
+    // or an eye -- actually does while moving.
+    if (this.autoFocus) {
+      const d = Math.hypot(
+        this.subject[0] - this.position[0],
+        this.subject[1] - this.position[1],
+        this.subject[2] - this.position[2],
+      );
+      this.focusDistance = Math.max(0.04, Math.min(2.0, d));
+    }
+    lookAt(this.view, this.position, at, [0, 1, 0]);
     perspective(this.proj, this.fovY, aspect, this.near, this.far);
     multiply(this.viewProj, this.proj, this.view);
     invert(this.invViewProj, this.viewProj);

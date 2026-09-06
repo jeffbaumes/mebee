@@ -3,6 +3,7 @@
 import { initWebGPU } from './gpu/device.js';
 import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
+import { BeeFlight } from './sim/flight.js';
 import { FLOWER, buildRayMesh } from './geom/flower.js';
 import { FLOATS_PER_VERTEX } from './geom/mesh.js';
 
@@ -50,9 +51,11 @@ const state = {
   renderScale: 1.0,
   animate: true,
   debugView: 0,
+  mode: 'orbit',           // 'orbit' inspects the flower, 'fly' is the bee
 };
 
 const camera = new MacroCamera();
+const bee = new BeeFlight();
 
 let fatalReported = false;
 function reportFatal(message, detail) {
@@ -71,20 +74,27 @@ function fail(message, detail) {
 }
 
 // --- input -----------------------------------------------------------------
+// Radius, in CSS pixels, at which the steering drag reaches full deflection.
+const STICK_RADIUS = 90;
+
 function bindInput() {
   const pointers = new Map();
   let lastPinch = 0;
-  // Gesture bookkeeping. A pinch ends with two pointerup events milliseconds
-  // apart, which a naive double-tap test reads as a double tap -- so every
-  // pinch immediately reset the framing it had just changed.
   let multiTouch = false;
   let travelled = 0;
   let lastTapTime = 0;
+  // Virtual stick: where the steering drag started, and where it is now.
+  let stickId = null;
+  let stickOrigin = { x: 0, y: 0 };
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size > 1) multiTouch = true;
+    if (state.mode === 'fly' && stickId === null) {
+      stickId = e.pointerId;
+      stickOrigin = { x: e.clientX, y: e.clientY };
+    }
   });
 
   canvas.addEventListener('pointermove', (e) => {
@@ -93,6 +103,19 @@ function bindInput() {
     const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
     travelled += Math.hypot(dx, dy);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+    if (state.mode === 'fly') {
+      // Rate control, not delta control: hold the drag off-centre and the bee
+      // keeps turning. Delta steering would need continuous thumb travel to
+      // hold a turn, which is unusable on a phone.
+      if (e.pointerId === stickId) {
+        bee.steer = [
+          Math.max(-1, Math.min(1, (e.clientX - stickOrigin.x) / STICK_RADIUS)),
+          Math.max(-1, Math.min(1, (e.clientY - stickOrigin.y) / STICK_RADIUS)),
+        ];
+      }
+      return;
+    }
 
     if (pointers.size === 1) {
       camera.orbit(dx * 0.006, dy * 0.006);
@@ -105,13 +128,16 @@ function bindInput() {
   });
 
   const release = (e) => {
-    // A tap is one finger that barely moved; anything else is a drag or pinch.
     const wasTap = !multiTouch && travelled < 12 && pointers.size === 1;
     pointers.delete(e.pointerId);
+    if (e.pointerId === stickId) {
+      stickId = null;
+      bee.steer = [0, 0];          // release levels the bee out
+    }
     if (pointers.size < 2) lastPinch = 0;
     if (pointers.size > 0) return;
 
-    if (wasTap) {
+    if (wasTap && state.mode === 'orbit') {
       const now = performance.now();
       if (now - lastTapTime < 320) {
         camera.resetFraming();
@@ -126,9 +152,60 @@ function bindInput() {
   canvas.addEventListener('pointercancel', release);
 
   canvas.addEventListener('wheel', (e) => {
+    if (state.mode === 'fly') return;
     e.preventDefault();
     camera.dolly(Math.exp(e.deltaY * 0.0011));
   }, { passive: false });
+
+  // --- boost ---------------------------------------------------------------
+  const boostBtn = document.getElementById('boost');
+  const setBoost = (on) => {
+    bee.boost = on ? 1 : 0;
+    boostBtn.classList.toggle('held', on);
+  };
+  boostBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); setBoost(true); });
+  for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
+    boostBtn.addEventListener(ev, () => setBoost(false));
+  }
+  // A pointer lost to a phone call or a backgrounded tab must not stick.
+  window.addEventListener('blur', () => setBoost(false));
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setBoost(true); }
+  });
+  window.addEventListener('keyup', (e) => { if (e.code === 'Space') setBoost(false); });
+
+  // --- mode ----------------------------------------------------------------
+  document.getElementById('mode').addEventListener('click', () => setMode(
+    state.mode === 'orbit' ? 'fly' : 'orbit'));
+}
+
+function setMode(mode) {
+  state.mode = mode;
+  const flying = mode === 'fly';
+  document.getElementById('mode').textContent = flying ? 'Orbit' : 'Fly';
+  document.getElementById('boost').hidden = !flying;
+  document.getElementById('hint').hidden = !flying;
+  bee.steer = [0, 0];
+  bee.boost = 0;
+  document.getElementById('boost').classList.remove('held');
+
+  if (flying) {
+    bee.reset();
+    // A macro lens is a telescope to fly with. Widen for flight, and put the
+    // aperture back where the depth of field still reads at this distance.
+    camera.focalLength = 0.030;
+    camera.mode = 'fly';
+  } else {
+    camera.focalLength = 0.055;
+    camera.mode = 'orbit';
+    camera.resetFraming();
+    camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+  }
+  const fl = document.getElementById('focalLength');
+  if (fl) {
+    fl.value = camera.focalLength;
+    fl.dispatchEvent(new Event('input'));
+  }
 }
 
 /** Wire every slider to its state or camera field. */
@@ -269,6 +346,10 @@ function resizeCanvas() {
       document.getElementById('floretFront').value = state.floretFront;
     }
 
+    if (state.mode === 'fly') {
+      bee.update(dt);
+      camera.setFly(bee.position, bee.forward());
+    }
     camera.update(canvas.width / canvas.height);
     renderer.render(camera, state, dt);
 

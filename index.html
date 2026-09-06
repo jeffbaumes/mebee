@@ -21,6 +21,25 @@
   #fps { position: absolute; top: env(safe-area-inset-top, 10px); left: 12px;
     font-variant-numeric: tabular-nums; font-size: 11px; color: #9aa0a6;
     text-shadow: 0 1px 3px #000; }
+  /* Flight controls. Sized for thumbs and kept clear of the panel. */
+  #mode { position: absolute; left: 12px; top: env(safe-area-inset-top, 10px);
+    margin-top: 18px; pointer-events: auto; background: var(--panel);
+    border: 1px solid var(--line); color: #e8e6e3; border-radius: 999px;
+    padding: 0 18px; min-height: 44px; font: inherit; font-size: 12.5px;
+    font-weight: 600; cursor: pointer; touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent; }
+  #boost { position: absolute; right: calc(18px + env(safe-area-inset-right, 0px));
+    bottom: calc(26px + env(safe-area-inset-bottom, 0px));
+    width: 104px; height: 104px; border-radius: 50%; pointer-events: auto;
+    background: rgba(217,140,174,0.16); border: 2px solid rgba(217,140,174,0.55);
+    color: #f3dbe6; font: inherit; font-size: 12px; font-weight: 700;
+    letter-spacing: .06em; cursor: pointer; touch-action: none;
+    -webkit-tap-highlight-color: transparent; transition: transform .08s, background .08s; }
+  #boost:active, #boost.held { background: rgba(217,140,174,0.42); transform: scale(0.94); }
+  /* Left-aligned so it never runs under the climb button on a narrow screen. */
+  #hint { position: absolute; left: 12px;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px)); font-size: 11px;
+    color: #9aa0a6; text-shadow: 0 1px 3px #000; pointer-events: none; }
   #build { position: absolute; bottom: 8px; left: 12px; font-size: 10px;
     color: #6b7176; text-shadow: 0 1px 3px #000; font-variant-numeric: tabular-nums; }
 
@@ -77,6 +96,9 @@
 <div id="hud">
   <div id="fps"></div>
   <div id="build"></div>
+  <button id="mode" type="button">Fly</button>
+  <button id="boost" type="button" hidden>CLIMB</button>
+  <div id="hint" hidden>drag to steer &middot; hold to climb</div>
 
   <div id="panel">
     <header id="panel-header">Flower <button id="panel-toggle" title="Show or hide controls">≡</button></header>
