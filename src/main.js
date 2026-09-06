@@ -74,16 +74,24 @@ function fail(message, detail) {
 function bindInput() {
   const pointers = new Map();
   let lastPinch = 0;
+  // Gesture bookkeeping. A pinch ends with two pointerup events milliseconds
+  // apart, which a naive double-tap test reads as a double tap -- so every
+  // pinch immediately reset the framing it had just changed.
+  let multiTouch = false;
+  let travelled = 0;
+  let lastTapTime = 0;
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size > 1) multiTouch = true;
   });
 
   canvas.addEventListener('pointermove', (e) => {
     const prev = pointers.get(e.pointerId);
     if (!prev) return;
     const dx = e.clientX - prev.x, dy = e.clientY - prev.y;
+    travelled += Math.hypot(dx, dy);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (pointers.size === 1) {
@@ -96,7 +104,24 @@ function bindInput() {
     }
   });
 
-  const release = (e) => { pointers.delete(e.pointerId); if (pointers.size < 2) lastPinch = 0; };
+  const release = (e) => {
+    // A tap is one finger that barely moved; anything else is a drag or pinch.
+    const wasTap = !multiTouch && travelled < 12 && pointers.size === 1;
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) lastPinch = 0;
+    if (pointers.size > 0) return;
+
+    if (wasTap) {
+      const now = performance.now();
+      if (now - lastTapTime < 320) {
+        camera.resetFraming();
+        camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+      }
+      lastTapTime = now;
+    }
+    multiTouch = false;
+    travelled = 0;
+  };
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
 
@@ -104,17 +129,6 @@ function bindInput() {
     e.preventDefault();
     camera.dolly(Math.exp(e.deltaY * 0.0011));
   }, { passive: false });
-
-  // Double tap or double click restores the automatic framing.
-  let lastTap = 0;
-  canvas.addEventListener('pointerup', (e) => {
-    const now = performance.now();
-    if (now - lastTap < 320) {
-      camera.resetFraming();
-      camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
-    }
-    lastTap = now;
-  });
 }
 
 /** Wire every slider to its state or camera field. */

@@ -325,7 +325,9 @@ export function buildStemMesh(seed = 11) {
 
   sampleSurface(mb, surf, NU, NV, {
     uv: (u, v) => [v * 3.0, u * 26],
-    axis: (u) => u,
+    // No secondary flutter: the stem's motion is the solved chain, and adding
+    // an independent wobble on top slides it against the head it carries.
+    axis: () => 0,
     stemHeight: 1,
     variant: rng.next(),
     doubleSided: false,
@@ -416,6 +418,10 @@ export function buildReceptacleMesh() {
       + Rd * 0.035 * Math.cos(th * 13) * u;
     return [Math.cos(th) * r, y, Math.sin(th) * r];
   };
-  sampleSurface(mb, surf, 16, 33, { uv: (u, v) => [v * 6, u], axis: (u) => 1 - u, stemHeight: 1 });
+  // axis 0: the receptacle is structural, not a lamina. Everything on the head
+  // -- receptacle, florets, petal bases -- shares one frame at the stem tip and
+  // must move as a single rigid body. Giving each part its own flutter phase is
+  // what made the head warp and the disc florets lag behind the cup they sit in.
+  sampleSurface(mb, surf, 16, 33, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
   return mb.finish();
 }
