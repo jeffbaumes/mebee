@@ -131,6 +131,10 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     // Pad velocity, for a lander to match: derived from the same fixed step
     // the solve uses, not the frame time.
     site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / FIXED_DT, 0.0);
+    // The side vector completes the frame: with it the host can reconstruct
+    // the head's full orientation and put a crawl surface on it that sways
+    // with the flower, without duplicating the solve on the CPU.
+    site.side = vec4f(top.side.xyz, 0.0);
     landing[0] = site;
   }
 }

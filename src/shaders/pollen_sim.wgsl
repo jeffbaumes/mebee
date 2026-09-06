@@ -11,8 +11,8 @@ struct Mote {
 
 @group(1) @binding(0) var<storage, read_write> motes : array<Mote>;
 
-const BOUNDS_LO = vec3f(-0.22, 0.0,  -0.22);
-const BOUNDS_HI = vec3f( 0.22, 0.62,  0.22);
+const BOUNDS_LO = vec3f(-0.40, 0.0,  -0.40);
+const BOUNDS_HI = vec3f( 0.40, 0.45,  0.40);
 
 fn windAtSimple(p: vec3f, t: f32) -> vec3f {
   let dir = normalize(vec3f(G.windParams.z, 0.0, G.windParams.w) + vec3f(1e-5, 0.0, 0.0));

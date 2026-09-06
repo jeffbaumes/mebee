@@ -16,8 +16,9 @@ struct StemNode {
  */
 struct LandingSite {
   pos      : vec4f,   // xyz world position, w = radius
-  normal   : vec4f,   // xyz surface normal, w = nectar 0..1
+  normal   : vec4f,   // xyz surface normal (the head's axis), w = nectar 0..1
   velocity : vec4f,   // xyz world velocity of the pad, w = occupied flag
+  side     : vec4f,   // xyz the head frame's side vector, w unused
 }
 
 const STEM_NODES : u32 = 16u;

@@ -6,12 +6,13 @@
 // quantities rather than as tuned blur radii.
 
 import { mat4, lookAt, perspective, invert, multiply } from './math.js';
+import { FLOWER } from '../geom/flower.js';
 
 export const SENSOR_HEIGHT = 0.024;   // full-frame, metres
 
 export class MacroCamera {
   constructor() {
-    this.target = [0, 0.40, 0];       // the flower head
+    this.target = [0, FLOWER.stemHeight, 0];   // the flower head
     this.minDistance = 0.045;
     this.maxDistance = 2.0;
     this.distance = 0.30;             // replaced by frameSubject() on first layout
@@ -26,14 +27,17 @@ export class MacroCamera {
     this.focusDistance = 0.20;
     this.autoFocus = true;
 
-    this.near = 0.01;
+    // A crawling bee's eye sits about 4mm off the petal, so the near plane has
+    // to be closer than that or the surface underfoot clips away.
+    this.near = 0.004;
     this.far = 12.0;
 
     // 'orbit' inspects the flower; 'fly' is the first-person bee.
     this.mode = 'orbit';
     this.flyPosition = [0, 0.4, 0.3];
     this.flyForward = [0, 0, -1];
-    this.subject = [0, 0.40, 0];      // what the lens focuses on
+    this.flyUp = [0, 1, 0];
+    this.subject = [0, FLOWER.stemHeight, 0];  // what the lens focuses on
 
     this.view = mat4();
     this.proj = mat4();
@@ -82,11 +86,16 @@ export class MacroCamera {
   /** Hand framing back to the automatic fit. */
   resetFraming() { this.userAdjusted = false; }
 
-  /** Drive the camera from the flight model. */
-  setFly(position, forward) {
+  /**
+   * Drive the camera from the flight model. `up` is not always world up: a bee
+   * crawling under a flower is upside down, and the horizon has to roll with it
+   * or the view reads as the world having tipped rather than the bee.
+   */
+  setFly(position, forward, up = [0, 1, 0]) {
     this.mode = 'fly';
     this.flyPosition = position;
     this.flyForward = forward;
+    this.flyUp = up;
   }
 
   update(aspect) {
@@ -126,7 +135,7 @@ export class MacroCamera {
       );
       this.focusDistance = Math.max(0.04, Math.min(2.0, d));
     }
-    lookAt(this.view, this.position, at, [0, 1, 0]);
+    lookAt(this.view, this.position, at, this.flyUp);
     perspective(this.proj, this.fovY, aspect, this.near, this.far);
     multiply(this.viewProj, this.proj, this.view);
     invert(this.invViewProj, this.viewProj);

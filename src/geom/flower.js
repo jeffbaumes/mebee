@@ -16,9 +16,11 @@ export const FLOWER = {
     { count: 21, length: 0.0235, width: 0.0062, droop: 0.62, tilt: 0.10 },
     { count: 13, length: 0.0181, width: 0.0050, droop: 0.40, tilt: 0.34 },
   ],
-  stemHeight: 0.40,
-  stemBaseRadius: 0.0027,
-  stemTopRadius: 0.0018,
+  // A daisy in a lawn: a full-size head on a short stem, standing about twice
+  // the height of the tallest grass rather than towering over it.
+  stemHeight: 0.180,
+  stemBaseRadius: 0.0021,
+  stemTopRadius: 0.0015,
 };
 
 // ---------------------------------------------------------------------------

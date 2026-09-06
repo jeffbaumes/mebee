@@ -225,6 +225,7 @@ function setMode(mode) {
   bee.steer = [0, 0];
   bee.boost = 0;
   document.getElementById('boost').classList.remove('held');
+  document.getElementById('boost').textContent = 'CLIMB';
 
   if (flying) {
     bee.reset();
@@ -368,6 +369,10 @@ function resizeCanvas() {
     }
   });
 
+  const boostLabel = document.getElementById('boost');
+  const hintEl = document.getElementById('hint');
+  let lastBeeMode = bee.mode;
+
   let last = performance.now();
   let frames = 0, fpsClock = last;
 
@@ -384,8 +389,28 @@ function resizeCanvas() {
     }
 
     if (state.mode === 'fly') {
-      bee.update(dt);
-      camera.setFly(bee.position, bee.forward());
+      // The head's frame arrives from the GPU a couple of frames late, which
+      // is far below what is visible at the speed the flower sways.
+      const head = renderer.headFrame;
+      bee.update(dt, head);
+      const fwd = bee.viewForward(head);
+      camera.setFly(bee.position, fwd, bee.upVector(head));
+      // Focus a short way ahead while crawling. Focusing on the flower's centre
+      // -- millimetres away, and clamped up to the minimum focus distance --
+      // would leave everything the bee is standing on out of focus.
+      camera.subject = bee.mode === 'crawl'
+        ? [bee.position[0] + fwd[0] * 0.035,
+           bee.position[1] + fwd[1] * 0.035,
+           bee.position[2] + fwd[2] * 0.035]
+        : [0, FLOWER.stemHeight, 0];
+      if (bee.mode !== lastBeeMode) {
+        lastBeeMode = bee.mode;
+        const crawling = bee.mode === 'crawl';
+        boostLabel.textContent = crawling ? 'TAKE OFF' : 'CLIMB';
+        hintEl.textContent = crawling
+          ? 'stick: walk the flower \u00b7 take off to leave'
+          : 'stick: turn \u0026 throttle \u00b7 hold to climb';
+      }
     }
     camera.update(canvas.width / canvas.height);
     renderer.render(camera, state, dt);

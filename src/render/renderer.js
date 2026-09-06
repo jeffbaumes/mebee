@@ -118,8 +118,8 @@ export class Renderer {
       ray: upload(F.buildRayMesh(), 'ray'),
       receptacle: upload(F.buildReceptacleMesh(), 'receptacle'),
       stem: upload(F.buildStemMesh(), 'stem'),
-      leafA: upload(F.buildLeafMesh(0.082, 0.232, 0.65, 17), 'leafA'),
-      leafB: upload(F.buildLeafMesh(0.066, 0.148, -2.05, 29), 'leafB'),
+      leafA: upload(F.buildLeafMesh(0.046, F.FLOWER.stemHeight * 0.58, 0.65, 17), 'leafA'),
+      leafB: upload(F.buildLeafMesh(0.037, F.FLOWER.stemHeight * 0.37, -2.05, 29), 'leafB'),
       floret: upload(F.buildDiscFloretMesh(), 'floret'),
     };
 
@@ -148,19 +148,34 @@ export class Renderer {
     this.stemBuffer = createBuffer(device, nodes,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
       'stemNodes');
+    // LandingSite is now four vec4f.
+    this.landingBytes = 4 * 4 * 4;
     this.landingBuffer = device.createBuffer({
       label: 'landingSites',
-      size: 4 * 4 * 3,
+      size: this.landingBytes,
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
+    // Ring of staging buffers so the head's frame can be read back every frame
+    // without ever blocking on a map. Two or three frames of latency is
+    // invisible at the speed the flower sways, and it beats duplicating the
+    // solver on the CPU, where float differences would let the crawl surface
+    // drift away from the flower actually being drawn.
+    this.landingStaging = Array.from({ length: 3 }, () => device.createBuffer({
+      size: this.landingBytes,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    }));
+    this.landingFree = [0, 1, 2];
+    /** @type {{pos:number[], up:number[], side:number[], velocity:number[]}|null} */
+    this.headFrame = null;
 
     // Pollen motes, seeded through the volume around the flower.
     const motes = new Float32Array(POLLEN_COUNT * 8);
     for (let i = 0; i < POLLEN_COUNT; i++) {
       const o = i * 8;
-      motes[o] = (Math.random() - 0.5) * 0.44;
-      motes[o + 1] = Math.random() * 0.62;
-      motes[o + 2] = (Math.random() - 0.5) * 0.44;
+      // Seeded across the play volume so motes are wherever the bee flies.
+      motes[o] = BOUNDS.min[0] + Math.random() * (BOUNDS.max[0] - BOUNDS.min[0]);
+      motes[o + 1] = Math.random() * (BOUNDS.max[1] + 0.05);
+      motes[o + 2] = BOUNDS.min[2] + Math.random() * (BOUNDS.max[2] - BOUNDS.min[2]);
       motes[o + 3] = 0.00006 + Math.random() * 0.00016;   // 60-220 micron
       motes[o + 7] = Math.random();
     }
@@ -626,7 +641,7 @@ export class Renderer {
     // base offset, putting the "sun" below the point it looked at so the scene
     // was lit and shadowed from underneath; and the ortho half-extent was 0.115
     // for a plant 0.40m tall, so most of the stem fell outside the shadow map.
-    const HALF = 0.30, NEAR = 0.02, FAR = 1.6;
+    const HALF = F.FLOWER.stemHeight * 0.95, NEAR = 0.02, FAR = 1.2;
     const centre = [camera.target[0], F.FLOWER.stemHeight * 0.55, camera.target[2]];
     const dist = 0.8;
     const eye = [
@@ -795,7 +810,29 @@ export class Renderer {
     // --- composite --------------------------------------------------------
     fullscreen('post', P.post, this.bgPost, this.context.getCurrentTexture().createView());
 
+    // Stage the landing sites for readback in the same submit.
+    const slot = this.landingFree.pop();
+    if (slot !== undefined) {
+      encoder.copyBufferToBuffer(this.landingBuffer, 0,
+        this.landingStaging[slot], 0, this.landingBytes);
+    }
+
     device.queue.submit([encoder.finish()]);
+
+    if (slot !== undefined) {
+      const buf = this.landingStaging[slot];
+      buf.mapAsync(GPUMapMode.READ).then(() => {
+        const f = new Float32Array(buf.getMappedRange());
+        this.headFrame = {
+          pos: [f[0], f[1], f[2]],
+          up: [f[4], f[5], f[6]],
+          velocity: [f[8], f[9], f[10]],
+          side: [f[12], f[13], f[14]],
+        };
+        buf.unmap();
+        this.landingFree.push(slot);
+      }).catch(() => { this.landingFree.push(slot); });
+    }
   }
 
   /**

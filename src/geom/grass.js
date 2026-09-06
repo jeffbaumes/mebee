@@ -93,10 +93,9 @@ export function buildGrassInstances(bounds, opts = {}) {
       const yaw = rng.range(0, Math.PI * 2);
       blades.push({
         x, z,
-        // Real grass runs 30-60 times longer than it is wide. At 3.4mm the
-        // blades read as broad leaves rather than grass.
-        height: 0.075 * vigour * rng.range(0.45, 1.7),
-        width: 0.0021 * rng.range(0.7, 1.35),
+        // Real grass runs 30-60 times longer than it is wide.
+        height: 0.040 * vigour * rng.range(0.45, 1.7),
+        width: 0.0013 * rng.range(0.7, 1.35),
         cos: Math.cos(yaw), sin: Math.sin(yaw),
         variant: rng.next(),
       });
