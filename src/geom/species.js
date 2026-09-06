@@ -84,6 +84,38 @@ function leafAlbedo(chlorophyll, senescence = 0) {
 // pigment and phenology, but a species that makes 21 rays makes 21 rays.
 
 /**
+ * Leaf outlines, one per non-clover species that carries visible leaves. A
+ * species with no `leafShape` falls back to venation.js's DEFAULT_SHAPE
+ * (oxeye's own leaf) rather than repeating it here.
+ *
+ * `halfWidth` is the curve's own peak (leafHalfWidth is built so the peak
+ * equals it exactly, whatever frontExp/backExp are), and frontExp/backExp
+ * move that peak up or down the blade -- low frontExp/high backExp puts it
+ * near the base (a leaf that tapers long to the tip); the reverse puts it
+ * near the tip (spoon-shaped, oblanceolate). That is real leaf-shape variety.
+ *
+ * What it is NOT free to vary is serration: the vein and margin maps are
+ * baked once for the whole field, against DEFAULT_SHAPE (see renderer.js),
+ * so every preset here is chosen to stay pointwise inside DEFAULT_SHAPE's own
+ * halfWidth curve along the whole blade -- a shape that pokes outside it
+ * would sample past the baked alpha and show as a hole in the leaf. `teeth`
+ * and `toothDepth` are therefore not exposed here; they would do nothing.
+ */
+const LEAF_SHAPES = {
+  // Narrow and base-heavy: widest close to the petiole, then a long taper --
+  // the closest this outline-only system gets to a finely cut leaf.
+  mayweed: { halfWidth: 0.115, frontExp: 0.34, backExp: 2.49 },
+  // Broad and symmetric, peak at the middle: a fleshier, blunter leaf.
+  marigold: { halfWidth: 0.235, frontExp: 1.75, backExp: 1.75 },
+  // Oblanceolate: narrow at the base, widest well past the middle, blunt at
+  // the tip -- the spoon shape a basal rosette leaf actually has.
+  catsear: { halfWidth: 0.155, frontExp: 2.30, backExp: 1.08 },
+  // Narrow like mayweed's, but widest toward the tip instead of the base --
+  // a different silhouette at a similar width, not just a smaller oxeye leaf.
+  cornflower: { halfWidth: 0.195, frontExp: 2.16, backExp: 1.44 },
+};
+
+/**
  * The trefoil every clover entry shares, so the leaf-only form and the
  * flowering minority are recognisably the same plant. Sized to clear short
  * turf rather than hide in it -- see geom/clover.js for the builder.
@@ -97,12 +129,15 @@ const CLOVER_LEAF = {
   petioleRadius: 0.00060,
   // A short stalk of its own before each leaflet's blade starts: three
   // leaflets this close to round cannot fit 120 degrees apart from a single
-  // shared point without their bases overlapping.
-  petiolule: 0.0035,
-  leafletLength: 0.014,
-  leafletWidth: 0.0115,
+  // shared point without their bases overlapping. Width a little over
+  // length is what makes them squat rather than lance-shaped, and together
+  // with the petiolule gets them close to touching without crossing, even
+  // at the worst of the per-leaflet size and angle jitter.
+  petiolule: 0.0030,
+  leafletLength: 0.013,
+  leafletWidth: 0.0145,
   fold: 0.32,
-  notch: 0.20,
+  notch: 0.18,
 };
 
 /**
@@ -160,6 +195,7 @@ export const SPECIES = [
     guide: 0.45,      // nectar-guide strength at the ray's base
     tipReach: 0.05,   // how far down from the tip the tip pigment runs
     chlorophyll: 1.15,
+    leafShape: LEAF_SHAPES.mayweed,
     stem: { height: 0.235, baseRadius: 0.00110, topRadius: 0.00085,
             leafScale: 0.62, leanMax: 0.22 },
     phenology: { bloom: 0.88, bloomSpread: 0.18, front: 0.30, frontSpread: 0.26 },
@@ -186,6 +222,7 @@ export const SPECIES = [
     guide: 0.95,      // nectar-guide strength at the ray's base
     tipReach: 0.22,   // how far down from the tip the tip pigment runs
     chlorophyll: 0.95,
+    leafShape: LEAF_SHAPES.marigold,
     stem: { height: 0.255, baseRadius: 0.00150, topRadius: 0.00120,
             leafScale: 1.00, leanMax: 0.16 },
     phenology: { bloom: 0.92, bloomSpread: 0.12, front: 0.42, frontSpread: 0.24 },
@@ -214,6 +251,7 @@ export const SPECIES = [
     guide: 0.75,      // nectar-guide strength at the ray's base
     tipReach: 0.28,   // how far down from the tip the tip pigment runs
     chlorophyll: 1.45,
+    leafShape: LEAF_SHAPES.catsear,
     stem: { height: 0.205, baseRadius: 0.00105, topRadius: 0.00080,
             leafScale: 0.35, leanMax: 0.10 },
     phenology: { bloom: 0.86, bloomSpread: 0.22, front: 0.18, frontSpread: 0.20 },
@@ -271,6 +309,7 @@ export const SPECIES = [
     guide: 0.60,      // nectar-guide strength at the ray's base
     tipReach: 0.55,   // how far down from the tip the tip pigment runs
     chlorophyll: 0.80,
+    leafShape: LEAF_SHAPES.cornflower,
     stem: { height: 0.330, baseRadius: 0.00125, topRadius: 0.00098,
             leafScale: 0.55, leanMax: 0.20 },
     phenology: { bloom: 0.90, bloomSpread: 0.14, front: 0.50, frontSpread: 0.20 },
@@ -285,7 +324,7 @@ export const SPECIES = [
     // a big trefoil. `cloverBloom` below is the minority that actually
     // flowers; the two share a niche and a dispersal kernel so they read as
     // one patch, not two competing species.
-    abundance: 1.70,
+    abundance: 2.60,
     head: { discRadius: 0.0012, dome: 0.0010, domeExp: 0.70, floretCount: 12 },
     rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
     ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
@@ -308,13 +347,15 @@ export const SPECIES = [
     // Stoloniferous and short: it wins on the grazed, trodden turf a lawn is
     // made of, and forms a tight mat rather than reaching for open ground.
     niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
-    // Clonal spread by stolon, so a patch is dense and packed edge to edge.
-    dispersal: { patchRadius: 0.26, clumpiness: 0.95, spacing: 0.022 },
+    // Clonal spread by stolon, so a patch is dense and packed edge to edge --
+    // and a wide patchRadius with a short spacing is what turns "a patch" into
+    // dozens of plants covering a real stretch of ground, not a handful.
+    dispersal: { patchRadius: 0.42, clumpiness: 0.95, spacing: 0.017 },
   },
   {
     key: 'cloverBloom',
     name: 'White clover (flowering)',
-    abundance: 0.40,
+    abundance: 0.60,
     // Not a composite: a clover head is a dense globe of small pea-flower
     // tubes with no ray whorl at all. That happens to be exactly the disc
     // floret this file already builds for every other species, so a "clover"
@@ -340,7 +381,7 @@ export const SPECIES = [
     // composite's before the head reads as blooming rather than budded.
     phenology: { bloom: 0.88, bloomSpread: 0.16, front: 0.68, frontSpread: 0.22 },
     niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
-    dispersal: { patchRadius: 0.26, clumpiness: 0.95, spacing: 0.022 },
+    dispersal: { patchRadius: 0.42, clumpiness: 0.95, spacing: 0.017 },
   },
 ];
 
@@ -380,6 +421,14 @@ export function stemWindGain(stemHeight, baseRadius) {
 export function headRadius(species) {
   let r = species.head.discRadius;
   for (const w of species.rays.whorls) r = Math.max(r, species.head.discRadius * 0.92 + w.length);
+  // The LOD system culls and tiers a plant by this radius alone, so a species
+  // whose widest visible feature is its LEAF -- clover, with a near-invisible
+  // flower bud -- has to report the leaf's own reach or it drops out (and gets
+  // frustum-culled) at a distance tuned for a 1mm bud rather than a 60mm leaf.
+  if (species.cloverLeaf) {
+    const c = species.cloverLeaf;
+    r = Math.max(r, c.petioleLength + c.leafletLength);
+  }
   return r;
 }
 

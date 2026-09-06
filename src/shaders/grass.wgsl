@@ -66,16 +66,17 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   // Grass grows in tufts, not scattered evenly over the ground: a block of
   // cells shares one anchor point and a chance of carrying no tuft at all, so
   // the sward reads as clumps with soil showing between them rather than a
-  // lawn. Blades within a tuft land in a disc around the anchor rather than
-  // spread across their own cell, which is what turns the per-cell window
-  // into visible bunches.
-  let tuftCells = 3.0;
+  // lawn. Blades within a tuft land in a small disc around the anchor -- a
+  // real bunchgrass crown is a point, not a patch -- rather than spread
+  // across their own cell, which is what turns the per-cell window into a
+  // tight bunch instead of a loose scatter.
+  let tuftCells = 1.6;
   let tuftCell = floor(cellXZ / tuftCells);
   let tc1 = hash21(tuftCell * 0.913 + vec2f(5.31, 17.07));
   let tc2 = hash21(tuftCell * 1.531 + vec2f(29.71, 3.19));
   let tuftExists = hash21(tuftCell * 2.117 + vec2f(41.03, 61.87)) > 0.32;
   let tuftRadius = cellSize * tuftCells *
-    mix(0.20, 0.42, hash21(tuftCell * 3.301 + vec2f(9.41, 71.23)));
+    mix(0.06, 0.18, hash21(tuftCell * 3.301 + vec2f(9.41, 71.23)));
   let tuftCentre = (tuftCell * tuftCells + vec2f(tc1, tc2) * tuftCells) * cellSize;
 
   let h1 = hash21(cellXZ * 1.37 + vec2f(f32(b) * 7.13, f32(b) * 3.71));
@@ -98,9 +99,9 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   // blur. Both collapse the blade to a point rather than branching, so the
   // vertex shader stays uniform and the triangles are culled as degenerate.
   let coc = abs(signedCoC(dist));
-  // A blade is roughly a millimetre wide. This is its width in pixels,
+  // A blade is under a millimetre wide. This is its width in pixels,
   // divided by the smallest feature the lens can still separate.
-  let widthPx = 0.0013 * G.screen.y / (2.0 * G.cameraPos.w * dist);
+  let widthPx = 0.0008 * G.screen.y / (2.0 * G.cameraPos.w * dist);
   let resolvable = widthPx / (1.0 + coc);
   let keep = clamp(resolvable * 2.2, 0.0, 1.0) * (1.0 - smoothstep(fade * 0.7, fade, dist));
   let alive = select(0.0, 1.0, h3 < keep && tuftExists);
@@ -110,7 +111,7 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   let hab = habitatAt(base.xz);
   let vigour = (0.45 + 0.95 * hab.r) * (1.0 - 0.55 * clamp(hab.b, 0.0, 1.0));
   let height = 0.055 * heightScale * vigour * (0.45 + 1.5 * h1) * alive;
-  let width = 0.0013 * (0.7 + 0.65 * h2);
+  let width = 0.0008 * (0.7 + 0.65 * h2);
   let yaw = h3 * 6.28318;
   let cs = cos(yaw);
   let sn = sin(yaw);

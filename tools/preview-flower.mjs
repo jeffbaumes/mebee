@@ -149,7 +149,7 @@ if (view === 'meadow' || view === 'plan') {
 // same sward the GPU would, rather than a second, differently-scattered one.
 if (process.env.GRASS !== '0') {
   const blade = buildGrassBladeMesh();
-  const CELL = 0.055, PER = 8;
+  const CELL = 0.055, PER = 8, TUFT_CELLS = 1.6;
   const hash = (x, y) => {
     let h = Math.imul(Math.round(x * 131) ^ Math.round(y * 977), 2246822519);
     h = Math.imul(h ^ (h >>> 15), 3266489917);
@@ -157,16 +157,43 @@ if (process.env.GRASS !== '0') {
   };
   const R = Number(process.env.GRASS_RADIUS || 0.6);
   const n = Math.ceil(R / CELL);
+  const tuftOf = new Map();
+  const tuft = (tcx, tcz) => {
+    const key = `${tcx},${tcz}`;
+    let t = tuftOf.get(key);
+    if (!t) {
+      const tc1 = hash(tcx * 0.913 + 5.31, tcz * 0.913 + 17.07);
+      const tc2 = hash(tcx * 1.531 + 29.71, tcz * 1.531 + 3.19);
+      const exists = hash(tcx * 2.117 + 41.03, tcz * 2.117 + 61.87) > 0.32;
+      const radius = CELL * TUFT_CELLS *
+        (0.06 + 0.12 * hash(tcx * 3.301 + 9.41, tcz * 3.301 + 71.23));
+      t = {
+        exists, radius,
+        x: (tcx * TUFT_CELLS + tc1 * TUFT_CELLS) * CELL,
+        z: (tcz * TUFT_CELLS + tc2 * TUFT_CELLS) * CELL,
+      };
+      tuftOf.set(key, t);
+    }
+    return t;
+  };
   for (let cz = -n; cz <= n; cz++) {
     for (let cx = -n; cx <= n; cx++) {
+      const t = tuft(Math.floor(cx / TUFT_CELLS), Math.floor(cz / TUFT_CELLS));
+      if (!t.exists) continue;
       for (let b = 0; b < PER; b++) {
         const h1 = hash(cx * 1.37 + b * 7.13, cz * 1.37 + b * 3.71);
-        const h2 = hash(cx * 2.71 + b * 1.93 + 11, cz * 2.71 + b * 5.17);
         const h3 = hash(cx * 0.83 + b * 9.41 + 31, cz * 0.83 + b * 2.29);
-        const bx = (cx + h1) * CELL, bz = (cz + h2) * CELL;
+        const h4 = hash(cx * 1.93 + b * 3.47 + 53, cz * 1.93 + b * 6.61);
+        const h5 = hash(cx * 4.19 + b * 8.03 + 23, cz * 4.19 + b * 1.27);
+        const rad = t.radius * Math.sqrt(h5);
+        const ang = h4 * 6.283;
+        const bx = t.x + Math.cos(ang) * rad, bz = t.z + Math.sin(ang) * rad;
         if (Math.hypot(bx, bz) > R) continue;
+        // Width jitter's own hash (h2 in grass.wgsl); folded in here since
+        // this preview does not otherwise use a second per-blade offset.
+        const h2 = hash(cx * 2.71 + b * 1.93 + 11, cz * 2.71 + b * 5.17);
         const height = 0.055 * (0.45 + 1.5 * h1);
-        const width = 0.0013 * (0.7 + 0.65 * h2);
+        const width = 0.0008 * (0.7 + 0.65 * h2);
         const cs = Math.cos(h3 * 6.283), sn = Math.sin(h3 * 6.283);
         meshes.push({
           mesh: blade,

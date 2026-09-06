@@ -70,9 +70,12 @@ export function buildCloverLeafMesh(cfg, seed = 19) {
   });
 
   // Three leaflets, evenly fanned with a little jitter in angle and tilt so
-  // the whorl does not read as a machined part.
+  // the whorl does not read as a machined part. The angle jitter is kept
+  // small on purpose: the leaflets are already sized to almost touch their
+  // neighbours (see CLOVER_LEAF in species.js), and a wider swing risks
+  // crossing into them.
   for (let i = 0; i < LEAFLETS; i++) {
-    const az = (i / LEAFLETS) * Math.PI * 2 + rng.sym(0.12);
+    const az = (i / LEAFLETS) * Math.PI * 2 + rng.sym(0.05);
     const tilt = rng.range(0.10, 0.24);        // leaflets tip up from the hub
     const cosA = Math.cos(az), sinA = Math.sin(az);
     const cosT = Math.cos(tilt), sinT = Math.sin(tilt);

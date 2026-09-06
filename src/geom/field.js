@@ -145,7 +145,7 @@ export function growField(bounds, opts = {}) {
     // Parents (patch centres). Drawn by rejection against the species' own
     // suitability, so patches land where the habitat suits -- this is the step
     // that couples ecology to layout rather than just tinting it afterwards.
-    const perPatch = Math.max(2, Math.round(6 + 26 * clumpiness));
+    const perPatch = Math.max(2, Math.round(6 + 60 * clumpiness));
     const parents = [];
     let guard = 0;
     while (parents.length < Math.ceil(quota / perPatch) && guard++ < 4000) {

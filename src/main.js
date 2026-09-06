@@ -121,6 +121,15 @@ function bindInput() {
   const stickEl = document.getElementById('stick');
   const knobEl = document.getElementById('stick-knob');
 
+  // Look: a second stick, claimed by whichever finger is not already
+  // steering. Vertical only -- turning already has an axis, this is the one
+  // that was missing -- and rate-control like the steering stick, so holding
+  // it off-centre keeps the view moving rather than needing continuous travel.
+  let lookId = null;
+  let lookOrigin = { x: 0, y: 0 };
+  const lookEl = document.getElementById('look-stick');
+  const lookKnobEl = document.getElementById('look-knob');
+
   /** Move the joystick under the thumb, so no reach is ever required. */
   const placeStick = (x, y) => {
     stickEl.style.left = `${x - STICK_SIZE / 2}px`;
@@ -135,6 +144,21 @@ function bindInput() {
     stickEl.classList.remove('active');
     knobEl.style.transform = '';
   };
+  const placeLook = (x, y) => {
+    lookEl.style.left = `${x - STICK_SIZE / 2}px`;
+    lookEl.style.top = `${y - STICK_SIZE / 2}px`;
+    lookEl.style.right = 'auto';
+    lookEl.style.bottom = 'auto';
+    lookEl.classList.add('active');
+  };
+  const restLook = () => {
+    lookEl.style.left = '';
+    lookEl.style.top = '';
+    lookEl.style.right = '';
+    lookEl.style.bottom = '';
+    lookEl.classList.remove('active');
+    lookKnobEl.style.transform = '';
+  };
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
@@ -144,6 +168,10 @@ function bindInput() {
       stickId = e.pointerId;
       stickOrigin = { x: e.clientX, y: e.clientY };
       placeStick(e.clientX, e.clientY);
+    } else if (state.mode === 'fly' && lookId === null) {
+      lookId = e.pointerId;
+      lookOrigin = { x: e.clientX, y: e.clientY };
+      placeLook(e.clientX, e.clientY);
     }
   });
 
@@ -170,6 +198,14 @@ function bindInput() {
         }
         bee.steer = [ox / STICK_RADIUS, oy / STICK_RADIUS];
         knobEl.style.transform = `translate(${ox}px, ${oy}px)`;
+      } else if (e.pointerId === lookId) {
+        // Vertical only: dragging up looks up. This nudges the auto aim
+        // rather than replacing it (see BeeFlight.update), so it does not
+        // need a horizontal axis of its own -- turning already has one.
+        let oy = e.clientY - lookOrigin.y;
+        oy = Math.max(-STICK_RADIUS, Math.min(STICK_RADIUS, oy));
+        bee.lookRate = -oy / STICK_RADIUS;
+        lookKnobEl.style.transform = `translate(0px, ${oy}px)`;
       }
       return;
     }
@@ -191,6 +227,11 @@ function bindInput() {
       stickId = null;
       bee.steer = [0, 0];          // release levels the bee out
       restStick();
+    }
+    if (e.pointerId === lookId) {
+      lookId = null;
+      bee.lookRate = 0;            // release settles back onto the auto aim
+      restLook();
     }
     if (pointers.size < 2) lastPinch = 0;
     if (pointers.size > 0) return;
@@ -232,6 +273,25 @@ function bindInput() {
   });
   window.addEventListener('keyup', (e) => { if (e.code === 'Space') setBoost(false); });
 
+  // Arrow-key look, for a mouse and keyboard: the same manual nudge on top
+  // of the auto aim the second-finger stick gives a touch player.
+  const lookKeys = new Set();
+  const updateLookKeys = () => {
+    bee.lookRate = (lookKeys.has('ArrowUp') ? 1 : 0) - (lookKeys.has('ArrowDown') ? 1 : 0);
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.code !== 'ArrowUp' && e.code !== 'ArrowDown') return;
+    e.preventDefault();
+    lookKeys.add(e.code);
+    updateLookKeys();
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.code !== 'ArrowUp' && e.code !== 'ArrowDown') return;
+    lookKeys.delete(e.code);
+    updateLookKeys();
+  });
+  window.addEventListener('blur', () => { lookKeys.clear(); bee.lookRate = 0; });
+
   // --- mode ----------------------------------------------------------------
   document.getElementById('mode').addEventListener('click', () => setMode(
     state.mode === 'orbit' ? 'fly' : 'orbit'));
@@ -243,9 +303,11 @@ function setMode(mode) {
   document.getElementById('mode').textContent = flying ? 'Orbit' : 'Fly';
   document.getElementById('boost').hidden = !flying;
   document.getElementById('stick').hidden = !flying;
+  document.getElementById('look-stick').hidden = !flying;
   document.getElementById('hint').hidden = !flying;
   bee.steer = [0, 0];
   bee.boost = 0;
+  bee.lookRate = 0;
   document.getElementById('boost').classList.remove('held');
   document.getElementById('boost').textContent = 'CLIMB';
 

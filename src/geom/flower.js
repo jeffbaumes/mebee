@@ -413,12 +413,18 @@ export function buildStemMesh(species = REFERENCE, seed = 11) {
  *
  * `attachFrac` is where on the stem it hangs, as a fraction of stem height;
  * the blade's own shape is in metres and independent of it.
+ *
+ * `shape` picks the outline (see species.js's `leafShape`), but only its
+ * smooth halfWidth curve -- the vein and margin maps are baked once, against
+ * DEFAULT_SHAPE, and shared by every species (see renderer.js), so a shape
+ * whose curve pokes outside DEFAULT_SHAPE's own margin anywhere along its
+ * length would sample outside the baked alpha and show as a hole. Every
+ * preset in species.js is checked against that before being used.
  */
-export function buildLeafMesh(bladeLength, attachFrac, azimuth, seed = 17) {
+export function buildLeafMesh(bladeLength, attachFrac, azimuth, seed = 17, shape = DEFAULT_SHAPE) {
   const rng = makeRng(seed);
   const mb = new MeshBuilder();
   const [NU, NV] = GRID.leaf;
-  const shape = DEFAULT_SHAPE;
   const cosA = Math.cos(azimuth), sinA = Math.sin(azimuth);
   const variant = rng.next();
   const droop = rng.range(0.16, 0.27);
@@ -514,13 +520,14 @@ export function buildReceptacleMesh(species = REFERENCE) {
 export function buildSpeciesMeshes(species) {
   const leafScale = species.stem.leafScale;
   const bladeLength = species.stem.height * 0.20 * leafScale;
+  const leafShape = species.leafShape ?? DEFAULT_SHAPE;
   const trefoil = species.cloverLeaf ? buildCloverLeafMesh(species.cloverLeaf) : null;
   return {
     stem: buildStemMesh(species),
     receptacle: buildReceptacleMesh(species),
     ray: buildRayMesh(species),
-    leafA: trefoil ?? (leafScale > 0.05 ? buildLeafMesh(bladeLength, 0.58, 0.65, 17) : null),
-    leafB: trefoil ? null : (leafScale > 0.05 ? buildLeafMesh(bladeLength * 0.80, 0.37, -2.05, 29) : null),
+    leafA: trefoil ?? (leafScale > 0.05 ? buildLeafMesh(bladeLength, 0.58, 0.65, 17, leafShape) : null),
+    leafB: trefoil ? null : (leafScale > 0.05 ? buildLeafMesh(bladeLength * 0.80, 0.37, -2.05, 29, leafShape) : null),
     florets: buildFloretInstances(species),
     headRadius: headRadius(species),
     rayCount: rayCount(species),

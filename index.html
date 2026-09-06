@@ -60,6 +60,17 @@
   #stick-knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px;
     margin: -28px 0 0 -28px; border-radius: 50%;
     background: rgba(232,230,227,0.30); border: 1px solid rgba(232,230,227,0.45); }
+  /* Second stick, for looking up and down: parked mid-right (clear of the
+     climb button below it), and jumps to the second thumb the same way. */
+  #look-stick { position: absolute; width: 132px; height: 132px; border-radius: 50%;
+    right: calc(20px + env(safe-area-inset-right, 0px));
+    bottom: calc(50% - 66px);
+    border: 2px solid rgba(232,230,227,0.22); background: rgba(20,23,26,0.28);
+    pointer-events: none; opacity: 0.45; transition: opacity .12s; }
+  #look-stick.active { opacity: 0.95; transition: none; }
+  #look-knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px;
+    margin: -28px 0 0 -28px; border-radius: 50%;
+    background: rgba(232,230,227,0.30); border: 1px solid rgba(232,230,227,0.45); }
   #hint { position: absolute; left: 12px;
     bottom: calc(172px + env(safe-area-inset-bottom, 0px)); font-size: 11px;
     color: #9aa0a6; text-shadow: 0 1px 3px #000; pointer-events: none; }
@@ -121,8 +132,9 @@
   <div id="build"></div>
   <button id="mode" type="button">Fly</button>
   <div id="stick" hidden><div id="stick-knob"></div></div>
+  <div id="look-stick" hidden><div id="look-knob"></div></div>
   <button id="boost" type="button" hidden>CLIMB</button>
-  <div id="hint" hidden>stick: turn &amp; throttle &middot; hold to climb</div>
+  <div id="hint" hidden>stick: turn &amp; throttle &middot; hold to climb &middot; second finger: look up/down</div>
 
   <div id="panel">
     <header id="panel-header">Meadow <button id="panel-toggle" title="Show or hide controls">≡</button></header>

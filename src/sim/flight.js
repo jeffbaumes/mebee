@@ -52,6 +52,18 @@ const VIEW_TILT_LAG = 3.0;  // 1/s
 const AIM_PITCH_LIMIT = 1.05;  // rad. Short of vertical on purpose: the flying
                                // camera's up is world up, and a look straight
                                // down the up-vector has no defined roll.
+// Below this altitude, the nearest-by-distance flower can still be one
+// standing well above the bee -- there is always something close and low to
+// look at near the ground (grass, clover, the turf itself) even where
+// nothing tall happens to be nearby. Fading the upward half of the aim out
+// as the bee settles is what makes low flight read as skimming the sward
+// instead of craning up at whatever flower is nearest in three dimensions.
+// The downward half is never touched -- looking down at something close and
+// low is exactly what flying near the ground should do more of.
+const GROUND_AIM_FADE = 0.25;  // m: full upward aim restored above this
+// How far the player can nudge the view up or down on top of the auto aim
+// (see `look` on BeeFlight), within the same AIM_PITCH_LIMIT ceiling.
+const LOOK_PITCH_RANGE = 0.85;  // rad
 const WALL_PUSH = 5.0;      // m/s^2 at the very edge of the cushion
 
 // --- crawl -----------------------------------------------------------------
@@ -169,6 +181,12 @@ export class BeeFlight {
     // Stick deflection in [-1,1]: x turns, y is throttle (up = forward).
     this.steer = [0, 0];
     this.boost = 0;
+    // Second-finger look deflection in [-1,1], up positive. Rate control like
+    // `steer`, not delta: held off-centre it keeps nudging the view rather
+    // than needing continuous thumb travel. It rides on TOP of the auto aim
+    // rather than replacing it -- see LOOK_PITCH_RANGE -- so letting go
+    // settles back onto whatever the auto aim was already doing.
+    this.lookRate = 0;
   }
 
   /** Where the camera looks: heading plus pitch. Travel ignores the pitch. */
@@ -346,11 +364,13 @@ export class BeeFlight {
     // Aim after moving, so the angle is the one this frame is rendered from.
     // The climb tilt rides on top as feedback: the camera still noses up as
     // the bee climbs and down as it settles, which is how you read your own
-    // vertical motion without an instrument.
+    // vertical motion without an instrument. The player's own look, if any,
+    // rides on top of that -- a nudge on the auto aim, not a replacement --
+    // so releasing the second finger settles back onto the subject.
     const climbTilt = Math.max(-VIEW_TILT_LIMIT,
       Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
-    const target = Math.max(-AIM_PITCH_LIMIT,
-      Math.min(AIM_PITCH_LIMIT, this.aimPitch(sites) + climbTilt));
+    const target = Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT,
+      this.aimPitch(sites) + climbTilt + this.lookRate * LOOK_PITCH_RANGE));
     this.pitch = approach(this.pitch, target, VIEW_TILT_LAG, step);
 
     // Touchdown, on whichever head's capture shell the bee is inside. The test
@@ -388,7 +408,12 @@ export class BeeFlight {
     // this returns from overhead, and an unusable view angle should never
     // leave the method that knows why it is capped.
     const a = Math.atan2(best[1] - this.position[1], flat);
-    return Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT, a));
+    // See GROUND_AIM_FADE: only the upward half is damped, and only by how
+    // close to the ground the bee itself is -- not by anything about the
+    // target -- so a flower that is merely far away is unaffected.
+    const groundFade = Math.max(0, Math.min(1, this.position[1] / GROUND_AIM_FADE));
+    const damped = a > 0 ? a * groundFade : a;
+    return Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT, damped));
   }
 
   /**
