@@ -35,18 +35,52 @@ struct VOut {
   @location(6) outward : vec3f,   // world direction from the head's centre
 }
 
+// Vertices per blob. A normal head is one billboard, six vertices; a species
+// with no ray whorl at all -- clover, whose real flower is a bud smaller than
+// a pixel at any distance that matters -- gets three, fanned the way its
+// trefoil is (see the leaflet fan-out below).
+const BLOB_VERTS = 6u;
+
 @vertex
 fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VOut {
   let vis = visible[ii];
   let P = plants[vis.plant];
   let top = stemNodes[vis.plant * STEM_NODES + STEM_NODES - 1u];
-  let centre = top.pos.xyz;
   let axis = normalize(top.axis.xyz + vec3f(0.0, 1e-5, 0.0));
-  let radius = max(1e-5, P.orient.z * P.base.w);
+  let fullRadius = max(1e-5, P.orient.z * P.base.w);
+
+  // headRadius (species.js) reports the LEAF's reach for a species with no ray
+  // whorl, not the bud's -- so the radius this file already gets for clover is
+  // the trefoil's own footprint. Three leaf-tinted blobs fanned around the hub
+  // read as the leaf they stand in for; one flower-tinted ellipse across the
+  // whole footprint (what this used to draw) reads as a pale smear, because it
+  // is coloured and sized as if the bud were the thing worth seeing.
+  let leafletSpecies = P.phase.w < 0.5;
+  let leaflet = vi / BLOB_VERTS;
 
   let corner = array(vec2f(-1.0,-1.0), vec2f(1.0,-1.0), vec2f(-1.0,1.0),
                      vec2f(-1.0, 1.0), vec2f(1.0,-1.0), vec2f( 1.0,1.0));
-  let c = corner[vi];
+  var c = corner[vi % BLOB_VERTS];
+
+  var centre = top.pos.xyz;
+  var radius = fullRadius;
+  if (leafletSpecies) {
+    // Three leaflets, evenly fanned with a little per-plant jitter so a patch
+    // does not look stamped from one mould -- the same idea clover.js uses for
+    // the real mesh's own leaflet jitter.
+    let jitter = (hash11(P.phase.z * 7.0 + f32(leaflet) * 3.1) - 0.5) * 0.6;
+    let az = f32(leaflet) * 2.0943951 + jitter;
+    let cs = P.orient.x;
+    let sn = P.orient.y;
+    let lx = cos(az);
+    let lz = sin(az);
+    let dir = vec3f(lx * cs - lz * sn, 0.0, lx * sn + lz * cs);
+    centre = top.pos.xyz + dir * (fullRadius * 0.42);
+    radius = fullRadius * 0.60;
+  } else if (leaflet != 0u) {
+    // A real flower head is one blob; collapse the spare two to nothing.
+    c = vec2f(0.0, 0.0);
+  }
 
   let toCam = G.cameraPos.xyz - centre;
   let dist = max(1e-4, length(toCam));
@@ -106,26 +140,39 @@ fn fs(i: VOut) -> @location(0) vec4f {
   // to cover the sub-pixel band -- but it is scaled by a fraction of the
   // circle of confusion so that the blob still reads as soft when the aperture
   // is stopped right down and dof.wgsl has almost nothing to do.
-  let soft = clamp(0.10 + 0.010 * vis.coc, 0.10, 0.65);
+  let leafletSpecies = P.phase.w < 0.5;
+  let soft = clamp(0.10 + 0.010 * vis.coc, 0.10, select(0.65, 0.55, leafletSpecies));
   var alpha = 1.0 - smoothstep(1.0 - soft, 1.0, r);
 
   // The star. A head is not a uniform disc: the rays reach out past the disc
   // and leave gaps between them, and just enough of that survives to be worth
   // drawing while anything at all is resolvable. `sharp` takes it out on
-  // exactly the schedule the lens does.
-  let theta = atan2(i.local.y, i.local.x);
-  let lobes = max(5.0, P.phase.w);
-  let star = 0.5 + 0.5 * cos(lobes * theta);
-  let starAmp = clamp(vis.sharp * 3.0, 0.0, 0.55);
-  alpha *= 1.0 - starAmp * smoothstep(0.45, 1.0, r) * (1.0 - star);
+  // exactly the schedule the lens does. A leaflet blob has no rays to speak
+  // of, so it skips the star entirely rather than drawing gaps in a leaf.
+  if (!leafletSpecies) {
+    let theta = atan2(i.local.y, i.local.x);
+    let lobes = max(5.0, P.phase.w);
+    let star = 0.5 + 0.5 * cos(lobes * theta);
+    let starAmp = clamp(vis.sharp * 3.0, 0.0, 0.55);
+    alpha *= 1.0 - starAmp * smoothstep(0.45, 1.0, r) * (1.0 - star);
+  }
   if (alpha < 0.004) { discard; }
 
-  // Colour: disc in the middle, rays outside, blending over the band where a
-  // real head's rays overlap the disc rim.
-  let discFrac = clamp(P.orient.w / max(1e-5, P.orient.z), 0.05, 0.9);
-  let bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
-  let rayCol = mix(P.leafCol.rgb, mix(P.rayCol.rgb, P.tipCol.rgb, 0.35 * r), bloom);
-  var albedo = mix(P.discCol.rgb, rayCol, smoothstep(discFrac * 0.75, discFrac * 1.5, r));
+  var albedo: vec3f;
+  var bloom = 0.0;
+  if (leafletSpecies) {
+    // The leaf, not the bud, is what a clover patch reads as at any distance
+    // -- so the blob is just foliage albedo, the same colour the real leaf
+    // mesh carries, with none of the disc/ray/bloom blend a real head needs.
+    albedo = P.leafCol.rgb;
+  } else {
+    // Colour: disc in the middle, rays outside, blending over the band where a
+    // real head's rays overlap the disc rim.
+    let discFrac = clamp(P.orient.w / max(1e-5, P.orient.z), 0.05, 0.9);
+    bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
+    let rayCol = mix(P.leafCol.rgb, mix(P.rayCol.rgb, P.tipCol.rgb, 0.35 * r), bloom);
+    albedo = mix(P.discCol.rgb, rayCol, smoothstep(discFrac * 0.75, discFrac * 1.5, r));
+  }
 
   // A shallow dome, so the blob is not a sticker. The normal starts as the
   // head's own axis at the centre and tilts outward toward the rim, which is
@@ -141,9 +188,12 @@ fn fs(i: VOut) -> @location(0) vec4f {
   var color = albedo * sun * max(0.0, ndl + 0.25) / (1.25 * PI);
   // Ray florets are thin membranes, so a head between the eye and the sun
   // glows. At this size that glow is most of what picks a flower out of a
-  // meadow, so it survives the impostor when nothing else does.
-  let back = pow(clamp(-dot(V, L), 0.0, 1.0), 2.2);
-  color += sun * back * P.transmit.rgb * albedo * 1.5 * bloom;
+  // meadow, so it survives the impostor when nothing else does. A leaflet
+  // blob has no ray florets and no bloom state, so it skips the glow.
+  if (!leafletSpecies) {
+    let back = pow(clamp(-dot(V, L), 0.0, 1.0), 2.2);
+    color += sun * back * P.transmit.rgb * albedo * 1.5 * bloom;
+  }
   color += albedo * skyAmbient(i.axis);
 
   if (i32(G.plant.w + 0.5) == 7) { color = vec3f(0.20, 0.40, 0.95) * 0.7; }

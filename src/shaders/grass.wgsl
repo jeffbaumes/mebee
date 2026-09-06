@@ -99,9 +99,9 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   // blur. Both collapse the blade to a point rather than branching, so the
   // vertex shader stays uniform and the triangles are culled as degenerate.
   let coc = abs(signedCoC(dist));
-  // A blade is under a millimetre wide. This is its width in pixels,
+  // A blade is well under a millimetre wide. This is its width in pixels,
   // divided by the smallest feature the lens can still separate.
-  let widthPx = 0.0008 * G.screen.y / (2.0 * G.cameraPos.w * dist);
+  let widthPx = 0.00035 * G.screen.y / (2.0 * G.cameraPos.w * dist);
   let resolvable = widthPx / (1.0 + coc);
   let keep = clamp(resolvable * 2.2, 0.0, 1.0) * (1.0 - smoothstep(fade * 0.7, fade, dist));
   let alive = select(0.0, 1.0, h3 < keep && tuftExists);
@@ -111,7 +111,7 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   let hab = habitatAt(base.xz);
   let vigour = (0.45 + 0.95 * hab.r) * (1.0 - 0.55 * clamp(hab.b, 0.0, 1.0));
   let height = 0.055 * heightScale * vigour * (0.45 + 1.5 * h1) * alive;
-  let width = 0.0008 * (0.7 + 0.65 * h2);
+  let width = 0.00035 * (0.7 + 0.65 * h2);
   let yaw = h3 * 6.28318;
   let cs = cos(yaw);
   let sn = sin(yaw);

@@ -14,7 +14,7 @@ export function buildGrassBladeMesh(seed = 41) {
   const rng = makeRng(seed);
   const mb = new MeshBuilder();
   const NU = 5, NV = 3;
-  const DROOP = 0.85;    // radians of arc from base to tip at rest
+  const DROOP = 1.5;     // radians of arc from base to tip at rest
   const FOLD = 0.55;     // depth of the central keel, as a fraction of width
 
   // Centreline, integrated from an angle that accelerates away from vertical.

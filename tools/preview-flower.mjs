@@ -193,7 +193,7 @@ if (process.env.GRASS !== '0') {
         // this preview does not otherwise use a second per-blade offset.
         const h2 = hash(cx * 2.71 + b * 1.93 + 11, cz * 2.71 + b * 5.17);
         const height = 0.055 * (0.45 + 1.5 * h1);
-        const width = 0.0008 * (0.7 + 0.65 * h2);
+        const width = 0.00035 * (0.7 + 0.65 * h2);
         const cs = Math.cos(h3 * 6.283), sn = Math.sin(h3 * 6.283);
         meshes.push({
           mesh: blade,

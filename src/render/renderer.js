@@ -999,11 +999,14 @@ export class Renderer {
         }
       }
 
-      // The far field, back to front.
+      // The far field, back to front. 18 vertices, not 6: a species with no
+      // ray whorl (clover) draws three leaf-tinted blobs per plant instead of
+      // one flower-tinted one -- see impostor.wgsl. Every other species just
+      // collapses the spare two to degenerate triangles.
       if (lod.impostor.count > 0) {
         pass.setPipeline(P.impostor);
         pass.setBindGroup(1, this.bgScene);
-        pass.draw(6, lod.impostor.count, 0, lod.impostor.base);
+        pass.draw(18, lod.impostor.count, 0, lod.impostor.base);
         triangles += 2 * lod.impostor.count;
       }
 
