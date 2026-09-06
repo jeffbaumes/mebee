@@ -220,7 +220,11 @@ export class BeeFlight {
   }
 
   updateCrawl(step, frame) {
-    this.surfaceHeading += this.steer[0] * CRAWL_TURN * step;
+    // Same sign as the flying turn. `surfaceHeading` measures from e1 toward
+    // e2, and (e1, e2, normal) is right-handed, so INCREASING it swings the
+    // view toward -right -- the opposite of what the identical stick does in
+    // the air. It read as the controls inverting the moment the bee landed.
+    this.surfaceHeading -= this.steer[0] * CRAWL_TURN * step;
     const throttle = -this.steer[1];
     const speed = throttle >= 0 ? throttle * CRAWL_FWD : throttle * CRAWL_BACK;
 

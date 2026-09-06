@@ -128,6 +128,12 @@ executed**. Compensating for that, the parts that could be checked offline were:
   shaders against the bind group layouts in `renderer.js`.
 - The `Globals` uniform offsets in `renderer.js` are cross-checked field by
   field against the WGSL struct.
+- `tools/check-flight.mjs` exercises the bee: that a given stick deflection
+  turns the view the same way in the air as on the flower (the crawl turn
+  shipped inverted relative to the flying turn, and nothing static could have
+  caught it), that the walk cannot leave the crawl dome from any heading on
+  an upright or a leaning head, and that a long flight stays finite and in
+  bounds. Part of `npm run check`.
 - `tools/sim-stem.mjs` is a CPU port of the GPU stem solver -- same integrator,
   constraints, ordering and constants -- which is how the wind timing was
   settled: it reports the tip's per-frame movement under steady, jittery and
