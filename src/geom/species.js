@@ -84,6 +84,28 @@ function leafAlbedo(chlorophyll, senescence = 0) {
 // pigment and phenology, but a species that makes 21 rays makes 21 rays.
 
 /**
+ * The trefoil every clover entry shares, so the leaf-only form and the
+ * flowering minority are recognisably the same plant. Sized to clear short
+ * turf rather than hide in it -- see geom/clover.js for the builder.
+ */
+const CLOVER_LEAF = {
+  // Low on the stem: the leaf sways with the plant's near-pinned base rather
+  // than its tip, which is most of what keeps it still against the gust a
+  // full-height peduncle answers to.
+  attachFrac: 0.15,
+  petioleLength: 0.045,
+  petioleRadius: 0.00060,
+  // A short stalk of its own before each leaflet's blade starts: three
+  // leaflets this close to round cannot fit 120 degrees apart from a single
+  // shared point without their bases overlapping.
+  petiolule: 0.0035,
+  leafletLength: 0.014,
+  leafletWidth: 0.0115,
+  fold: 0.32,
+  notch: 0.20,
+};
+
+/**
  * The taxa. Lengths are metres; a bee works at this scale, so "head" numbers
  * in the 20-50mm range are the whole subject.
  *
@@ -258,13 +280,47 @@ export const SPECIES = [
   {
     key: 'clover',
     name: 'White clover',
-    abundance: 0.80,
+    // The plant most people mean by "clover patch" is the leaf, not the
+    // flower -- so this is the common form: a short, almost hidden bud under
+    // a big trefoil. `cloverBloom` below is the minority that actually
+    // flowers; the two share a niche and a dispersal kernel so they read as
+    // one patch, not two competing species.
+    abundance: 1.70,
+    head: { discRadius: 0.0012, dome: 0.0010, domeExp: 0.70, floretCount: 12 },
+    rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
+    ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
+    tip:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
+    disc: { carotenoid: 0.04, anthocyanin: 0.20, cyanic: 0.0 },
+    guide: 0.0,       // no ray whorl to guide a bee into
+    tipReach: 0.0,
+    chlorophyll: 1.30,
+    cloverLeaf: CLOVER_LEAF,
+    // Short AND thick: a stiff, stubby peduncle carrying a bud nobody is
+    // meant to notice under the leaf canopy. Thickness matters as much as
+    // height here -- see stemWindGain in this file -- because a stem this
+    // short on the old thin radius still swayed enough to read as jitter.
+    stem: { height: 0.032, baseRadius: 0.00110, topRadius: 0.00090,
+            leafScale: 1.0, leanMax: 0.08 },
+    // Low bloom AND low front keep the tiny disc folded -- floret.wgsl's
+    // openness is bloom times the maturation front -- so what would
+    // otherwise be a white fleck under the leaves stays a closed green bud.
+    phenology: { bloom: 0.22, bloomSpread: 0.10, front: 0.10, frontSpread: 0.10 },
+    // Stoloniferous and short: it wins on the grazed, trodden turf a lawn is
+    // made of, and forms a tight mat rather than reaching for open ground.
+    niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
+    // Clonal spread by stolon, so a patch is dense and packed edge to edge.
+    dispersal: { patchRadius: 0.26, clumpiness: 0.95, spacing: 0.022 },
+  },
+  {
+    key: 'cloverBloom',
+    name: 'White clover (flowering)',
+    abundance: 0.40,
     // Not a composite: a clover head is a dense globe of small pea-flower
     // tubes with no ray whorl at all. That happens to be exactly the disc
     // floret this file already builds for every other species, so a "clover"
     // here is just that floret, packed onto a near-spherical dome instead of
     // a flat one, with the ray whorl left empty.
-    head: { discRadius: 0.0075, dome: 0.0070, domeExp: 0.62, floretCount: 260 },
+    head: { discRadius: 0.0078, dome: 0.0072, domeExp: 0.62, floretCount: 260 },
     rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
     ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
     tip:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
@@ -274,16 +330,16 @@ export const SPECIES = [
     guide: 0.0,       // no ray whorl to guide a bee into
     tipReach: 0.0,
     chlorophyll: 1.30,
-    stem: { height: 0.085, baseRadius: 0.00055, topRadius: 0.00045,
-            leafScale: 0.55, leanMax: 0.10 },
+    cloverLeaf: CLOVER_LEAF,
+    // Taller than the leaf-only form so the head clears the canopy, and just
+    // as thick: the same fix for the same jitter.
+    stem: { height: 0.100, baseRadius: 0.00115, topRadius: 0.00095,
+            leafScale: 1.0, leanMax: 0.10 },
     // The disc is the whole flower here -- there is no ray whorl to hide an
     // unopened crown -- so the front needs to run much further than a
     // composite's before the head reads as blooming rather than budded.
     phenology: { bloom: 0.88, bloomSpread: 0.16, front: 0.68, frontSpread: 0.22 },
-    // Stoloniferous and short: it wins on the grazed, trodden turf a lawn is
-    // made of, and forms a tight mat rather than reaching for open ground.
     niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
-    // Clonal spread by stolon, so a patch is dense and packed edge to edge.
     dispersal: { patchRadius: 0.26, clumpiness: 0.95, spacing: 0.022 },
   },
 ];

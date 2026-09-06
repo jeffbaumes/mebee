@@ -12,11 +12,19 @@ import { HeadSites, crawlAxes } from './sites.js';
  *
  * `margin` is the soft cushion inside the wall. The ceiling clears the tallest
  * species (a cornflower runs to 330mm) with room to look down on it.
+ *
+ * `floorMargin` replaces it for the ground alone. The general margin is sized
+ * for the outer walls, where there is nothing to see right at the edge
+ * anyway; applied to the floor too it started pushing back a third of a
+ * metre up, well above every low, ground-hugging species (a clover leaf tops
+ * out under 65mm) -- so the one thing "get close to a short plant" needs was
+ * exactly the one thing the cushion was built to prevent.
  */
 export const BOUNDS = {
   min: [-3.5, 0.020, -3.5],
   max: [3.5, 0.900, 3.5],
   margin: 0.35,
+  floorMargin: 0.05,
 };
 
 // Speeds are set by how long it should take to cross the field, not by
@@ -389,12 +397,15 @@ export class BeeFlight {
    * of a dive on its own.
    */
   applyBounds(dt) {
-    const { min, max, margin } = BOUNDS;
+    const { min, max, margin, floorMargin } = BOUNDS;
     for (let a = 0; a < 3; a++) {
       const p = this.position[a];
-      const under = min[a] + margin - p;
+      // The floor gets its own, much closer cushion (see BOUNDS above); every
+      // other wall keeps the general one.
+      const lowMargin = a === 1 ? floorMargin : margin;
+      const under = min[a] + lowMargin - p;
       const over = p - (max[a] - margin);
-      if (under > 0) this.velocity[a] += WALL_PUSH * (under / margin) * dt;
+      if (under > 0) this.velocity[a] += WALL_PUSH * (under / lowMargin) * dt;
       if (over > 0) this.velocity[a] -= WALL_PUSH * (over / margin) * dt;
 
       if (p < min[a]) {

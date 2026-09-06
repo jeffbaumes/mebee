@@ -19,6 +19,7 @@
 import { MeshBuilder, sampleSurface, normalize } from './mesh.js';
 import { makeRng, fbm2 } from './rand.js';
 import { leafHalfWidth, DEFAULT_SHAPE } from './venation.js';
+import { buildCloverLeafMesh } from './clover.js';
 import { SPECIES, headRadius, rayCount } from './species.js';
 
 export const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // 137.507...deg
@@ -506,17 +507,20 @@ export function buildReceptacleMesh(species = REFERENCE) {
  *
  * Leaves are skipped for species that carry none above the rosette -- a common
  * daisy's leaves are flat on the ground under the sward, so drawing them is
- * paying for geometry that is never visible.
+ * paying for geometry that is never visible. A species carrying `cloverLeaf`
+ * gets the trefoil builder instead of the generic single blade, in the one
+ * leaf slot a compound leaf needs.
  */
 export function buildSpeciesMeshes(species) {
   const leafScale = species.stem.leafScale;
   const bladeLength = species.stem.height * 0.20 * leafScale;
+  const trefoil = species.cloverLeaf ? buildCloverLeafMesh(species.cloverLeaf) : null;
   return {
     stem: buildStemMesh(species),
     receptacle: buildReceptacleMesh(species),
     ray: buildRayMesh(species),
-    leafA: leafScale > 0.05 ? buildLeafMesh(bladeLength, 0.58, 0.65, 17) : null,
-    leafB: leafScale > 0.05 ? buildLeafMesh(bladeLength * 0.80, 0.37, -2.05, 29) : null,
+    leafA: trefoil ?? (leafScale > 0.05 ? buildLeafMesh(bladeLength, 0.58, 0.65, 17) : null),
+    leafB: trefoil ? null : (leafScale > 0.05 ? buildLeafMesh(bladeLength * 0.80, 0.37, -2.05, 29) : null),
     florets: buildFloretInstances(species),
     headRadius: headRadius(species),
     rayCount: rayCount(species),
