@@ -251,6 +251,15 @@ export const FLORET_INSTANCE_FLOATS = 8;
 const FI = { posX: 0, posY: 1, posZ: 2, scale: 3, nrmX: 4, nrmY: 5, nrmZ: 6, radius: 7 };
 
 /**
+ * Crown of the disc: height above the head plane as a function of the
+ * normalised radius rn = r / discRadius. Exported because the receptacle and
+ * the florets standing on it must read the same curve -- if they drift apart
+ * the cushion either floats above its florets or sinks away beneath them.
+ */
+export const discDomeY = (rn) =>
+  FLOWER.discDome * Math.pow(Math.max(0, 1 - rn * rn), 0.70);
+
+/**
  * Vogel's model: r = c*sqrt(n), theta = n * goldenAngle. The golden angle is
  * the only divergence that never lets florets fall into radial rows, which is
  * why every real capitulum shows the same interlocking Fibonacci spirals.
@@ -262,9 +271,7 @@ export function buildFloretInstances(seed = 5) {
   const N = FLOWER.floretCount;
   const Rd = FLOWER.discRadius;
   const data = new Float32Array(N * FLORET_INSTANCE_FLOATS);
-
-  // Dome the disc slightly; y falls off toward the rim.
-  const domeY = (rn) => FLOWER.discDome * Math.pow(Math.max(0, 1 - rn * rn), 0.70);
+  const domeY = discDomeY;
 
   for (let n = 0; n < N; n++) {
     const rn = Math.sqrt((n + 0.5) / N);          // uniform areal density
@@ -411,19 +418,33 @@ export function buildRayMesh(seed = 23) {
 export function buildReceptacleMesh() {
   const mb = new MeshBuilder();
   const Rd = FLOWER.discRadius, headY = FLOWER.stemHeight;
+  const RIM = 1.22;   // how far the bracts flare past the disc, in disc radii
+
   const surf = (u, v) => {
     const th = v * Math.PI * 2;
-    // A shallow bowl under the disc that flares into reflexed bracts.
-    const r = Rd * (0.20 + 1.02 * Math.sin(u * Math.PI * 0.5));
-    const y = headY + FLOWER.discDome * Math.pow(1 - u, 1.6) * 0.9
-      - Rd * 0.42 * Math.pow(u, 2.3)
-      + Rd * 0.035 * Math.cos(th * 13) * u;
+    // Radial profile of a closed cap: r = 0 at u = 0. It used to start at
+    // 0.20*Rd, which made the cushion an annulus with a 2.3mm hole punched
+    // through the crown. Disc florets are round and pack with gaps, so they
+    // could never tile over it -- you saw straight through the middle of the
+    // flower to the sky behind.
+    const r = Rd * RIM * Math.sin(u * Math.PI * 0.5);
+    const rn = r / Rd;
+
+    // Under the disc the cushion IS the dome the florets stand on, read from
+    // the same curve their instances are placed on, so the two cannot drift.
+    // Past the rim it falls away into the reflexed involucral bracts; `beyond`
+    // is zero at the rim with zero slope, so the two halves meet smoothly.
+    const beyond = Math.max(0, rn - 1) / (RIM - 1);
+    const y = headY + discDomeY(Math.min(1, rn))
+      - Rd * 0.42 * Math.pow(beyond, 1.4)
+      + Rd * 0.035 * Math.cos(th * 13) * beyond;
     return [Math.cos(th) * r, y, Math.sin(th) * r];
   };
+
   // axis 0: the receptacle is structural, not a lamina. Everything on the head
   // -- receptacle, florets, petal bases -- shares one frame at the stem tip and
   // must move as a single rigid body. Giving each part its own flutter phase is
   // what made the head warp and the disc florets lag behind the cup they sit in.
-  sampleSurface(mb, surf, 16, 33, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
+  sampleSurface(mb, surf, 20, 33, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
   return mb.finish();
 }

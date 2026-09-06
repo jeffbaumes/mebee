@@ -11,8 +11,12 @@ const headY = F.FLOWER.stemHeight;
 
 const meshes = [
   { mesh: F.buildStemMesh(),       albedo: [0.20, 0.34, 0.12] },
-  { mesh: F.buildLeafMesh(0.075, 0.235,  0.6), albedo: [0.16, 0.36, 0.10], translucency: 0.8 },
-  { mesh: F.buildLeafMesh(0.062, 0.150, -2.1, 29), albedo: [0.16, 0.36, 0.10], translucency: 0.8 },
+  // Same two leaves the renderer builds. These were absolute heights from
+  // before the plant was rescaled, which left them attached above the top of
+  // the stem -- so the preview hung a leaf across the flower head that the
+  // real scene never shows, right over the part the top view exists to check.
+  { mesh: F.buildLeafMesh(0.046, headY * 0.58,  0.65, 17), albedo: [0.16, 0.36, 0.10], translucency: 0.8 },
+  { mesh: F.buildLeafMesh(0.037, headY * 0.37, -2.05, 29), albedo: [0.16, 0.36, 0.10], translucency: 0.8 },
   { mesh: F.buildReceptacleMesh(), albedo: [0.26, 0.34, 0.14] },
   { mesh: F.buildRayMesh(),        albedo: [0.72, 0.30, 0.48], translucency: 1.0 },
 ];
