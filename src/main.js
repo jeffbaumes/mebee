@@ -3,6 +3,20 @@
 import { initWebGPU } from './gpu/device.js';
 import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
+import { FLOWER, buildRayMesh } from './geom/flower.js';
+import { FLOATS_PER_VERTEX } from './geom/mesh.js';
+
+/** Widest extent of the flower head, measured rather than assumed. */
+function headRadius() {
+  const ray = buildRayMesh();
+  let r = 0;
+  for (let i = 0; i < ray.vertexCount; i++) {
+    const o = i * FLOATS_PER_VERTEX;
+    r = Math.max(r, Math.hypot(ray.vertices[o], ray.vertices[o + 2]));
+  }
+  return r;
+}
+const HEAD_RADIUS = headRadius();
 
 // Anything that throws outside boot()'s own try/catch -- a listener, a late
 // rejection -- would otherwise just leave the loading overlay up forever with
@@ -90,6 +104,17 @@ function bindInput() {
     e.preventDefault();
     camera.dolly(Math.exp(e.deltaY * 0.0011));
   }, { passive: false });
+
+  // Double tap or double click restores the automatic framing.
+  let lastTap = 0;
+  canvas.addEventListener('pointerup', (e) => {
+    const now = performance.now();
+    if (now - lastTap < 320) {
+      camera.resetFraming();
+      camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+    }
+    lastTap = now;
+  });
 }
 
 /** Wire every slider to its state or camera field. */
@@ -137,6 +162,8 @@ function resizeCanvas() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2) * state.renderScale;
   canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
   canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  // Re-fit on rotation: portrait and landscape need very different distances.
+  camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
 }
 
 // --- boot ------------------------------------------------------------------

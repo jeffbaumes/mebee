@@ -12,10 +12,12 @@ export const SENSOR_HEIGHT = 0.024;   // full-frame, metres
 export class MacroCamera {
   constructor() {
     this.target = [0, 0.40, 0];       // the flower head
-    // Far enough back that the whole head plus some stem is in frame; at 0.20
-    // the flower filled better than 80% of the height and read as a wall of
-    // petals rather than a flower.
-    this.distance = 0.26;
+    this.minDistance = 0.045;
+    this.maxDistance = 2.0;
+    this.distance = 0.30;             // replaced by frameSubject() on first layout
+    // Auto-framing steps aside as soon as the viewer zooms themselves.
+    this.userAdjusted = false;
+
     this.yaw = 0.75;
     this.pitch = 0.22;
 
@@ -39,14 +41,40 @@ export class MacroCamera {
     return 2 * Math.atan(SENSOR_HEIGHT / (2 * this.focalLength));
   }
 
+  /**
+   * Distance at which a subject of `radius` just fits the frame.
+   *
+   * The binding constraint is whichever axis is narrower, which on a portrait
+   * phone is the horizontal one -- and by a lot. Framing on vertical FOV alone
+   * looked right on a 16:9 desktop while cutting the flower off on a phone:
+   * at 0.26m a 390x844 viewport sees 52mm across, and the flower is 71mm.
+   */
+  fitDistance(radius, aspect, margin = 1.18) {
+    const halfY = this.fovY / 2;
+    const halfX = Math.atan(Math.tan(halfY) * aspect);
+    return (radius * margin) / Math.tan(Math.min(halfX, halfY));
+  }
+
+  /** Frame the subject, unless the viewer has taken manual control. */
+  frameSubject(radius, aspect) {
+    if (this.userAdjusted) return;
+    this.distance = Math.min(this.maxDistance,
+      Math.max(this.minDistance, this.fitDistance(radius, aspect)));
+  }
+
   orbit(dx, dy) {
     this.yaw -= dx;
     this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch + dy));
   }
 
   dolly(factor) {
-    this.distance = Math.max(0.045, Math.min(1.2, this.distance * factor));
+    this.userAdjusted = true;
+    this.distance = Math.max(this.minDistance,
+      Math.min(this.maxDistance, this.distance * factor));
   }
+
+  /** Hand framing back to the automatic fit. */
+  resetFraming() { this.userAdjusted = false; }
 
   update(aspect) {
     const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
