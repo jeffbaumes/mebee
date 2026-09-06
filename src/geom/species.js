@@ -255,6 +255,37 @@ export const SPECIES = [
     niche: { moisture: 0.30, tolerance: 0.22, exposure: 0.90, shortTurf: 0.0 },
     dispersal: { patchRadius: 0.40, clumpiness: 0.90, spacing: 0.070 },
   },
+  {
+    key: 'clover',
+    name: 'White clover',
+    abundance: 0.80,
+    // Not a composite: a clover head is a dense globe of small pea-flower
+    // tubes with no ray whorl at all. That happens to be exactly the disc
+    // floret this file already builds for every other species, so a "clover"
+    // here is just that floret, packed onto a near-spherical dome instead of
+    // a flat one, with the ray whorl left empty.
+    head: { discRadius: 0.0075, dome: 0.0070, domeExp: 0.62, floretCount: 260 },
+    rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
+    ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
+    tip:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
+    // The whole visible head is disc floret, so its pigment carries the
+    // colour: a warm white with the faint rose blush a clover ball ages into.
+    disc: { carotenoid: 0.04, anthocyanin: 0.20, cyanic: 0.0 },
+    guide: 0.0,       // no ray whorl to guide a bee into
+    tipReach: 0.0,
+    chlorophyll: 1.30,
+    stem: { height: 0.085, baseRadius: 0.00055, topRadius: 0.00045,
+            leafScale: 0.55, leanMax: 0.10 },
+    // The disc is the whole flower here -- there is no ray whorl to hide an
+    // unopened crown -- so the front needs to run much further than a
+    // composite's before the head reads as blooming rather than budded.
+    phenology: { bloom: 0.88, bloomSpread: 0.16, front: 0.68, frontSpread: 0.22 },
+    // Stoloniferous and short: it wins on the grazed, trodden turf a lawn is
+    // made of, and forms a tight mat rather than reaching for open ground.
+    niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
+    // Clonal spread by stolon, so a patch is dense and packed edge to edge.
+    dispersal: { patchRadius: 0.26, clumpiness: 0.95, spacing: 0.022 },
+  },
 ];
 
 export const SPECIES_BY_KEY = Object.fromEntries(SPECIES.map((s) => [s.key, s]));
@@ -306,7 +337,7 @@ export const rayCount = (species) =>
  * modulates its star by, so a distant cornflower reads as thirteen broad
  * lobes and a distant cat's-ear as a finely fringed disc.
  */
-export const silhouetteRays = (species) => species.rays.whorls[0].count;
+export const silhouetteRays = (species) => species.rays.whorls[0]?.count ?? 0;
 
 // ---------------------------------------------------------------------------
 // Individuals

@@ -172,7 +172,7 @@ export class Renderer {
       })),
     });
 
-    // --- the six species -------------------------------------------------
+    // --- the species -------------------------------------------------------
     // One set of meshes each, shared by every individual of that species. All
     // the variation -- size, height, pigment, phenology -- is in the instance.
     const floretBlocks = [];
@@ -181,7 +181,12 @@ export class Renderer {
       const meshes = F.buildSpeciesMeshes(s);
       const parts = {};
       for (const { key } of PARTS) {
-        if (meshes[key]) parts[key] = upload(meshes[key], `${s.key}.${key}`);
+        // A species with no ray whorl (clover) builds a real but empty ray
+        // mesh; uploading a zero-vertex buffer is a WebGPU validation error,
+        // and drawRun already treats a missing part as nothing to draw.
+        if (meshes[key] && meshes[key].vertexCount > 0) {
+          parts[key] = upload(meshes[key], `${s.key}.${key}`);
+        }
       }
       floretBlocks.push(meshes.florets.data);
       const info = {

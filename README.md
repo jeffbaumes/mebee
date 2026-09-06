@@ -7,9 +7,9 @@ at insect scale comes mostly from **simulating the camera and the light**, not
 from modelling more geometry.
 
 Everything is procedural. There are no art assets — no meshes, no textures, no
-scans. Six species of composite are grown from botanical rules at load time,
-and several hundred plants are sown across a seven-metre field by an ecological
-sampler.
+scans. Six species of composite and a clover are grown from botanical rules at
+load time, and several hundred plants are sown across a seven-metre field by
+an ecological sampler.
 
 ![the meadow from bee height](docs/meadow.png)
 
@@ -77,8 +77,8 @@ Two things keep it bounded rather than merely clever. Per-tier budgets
 points — a plant that misses its tier is demoted, never dropped. And the three
 mesh levels are **index-only**: they stitch every 2nd or 4th row and column of
 the same vertices, so switching tier costs an index-buffer swap, moves nothing
-on screen, and needs no extra memory. Across all six species that is 59k
-vertices and 102k / 26k / 4.4k triangles at the three levels.
+on screen, and needs no extra memory. Across all seven species that is 62k
+vertices and 107k / 27k / 4.6k triangles at the three levels.
 
 Turn on **View → LOD tier** in the panel to see the tiers colour-coded, and
 **Detail bias** to watch the whole field coarsen and refine.
@@ -240,7 +240,9 @@ of millions of blades, almost all of them behind the camera or inside the
 bokeh. So `grass.wgsl` hashes each blade out of a fixed world grid inside a
 window that follows the camera: blades stay nailed to the world, the cost is
 constant wherever the bee flies, and the field could be a hundred metres across
-for the same price.
+for the same price. Blades cluster into tufts rather than tiling evenly —
+each block of cells hashes its own clump centre and a chance of carrying no
+tuft at all, so the sward reads as bunches with bare ground between them.
 
 ## Layout
 
@@ -327,7 +329,7 @@ thresholds and per-tier budgets to need one against an actual frame time.
 
 - Disc florets and grass are skipped in the shadow pass, and only the two
   finest tiers cast at all.
-- The leaf bake plus six species of geometry costs ~1s on the main thread at
+- The leaf bake plus seven species of geometry costs ~1s on the main thread at
   startup; it belongs in a worker.
 - No TAA, so petal margins and pollen will alias under motion — and with
   several hundred plants there is a great deal more margin than there was.

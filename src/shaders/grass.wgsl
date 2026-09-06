@@ -63,10 +63,32 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   let home = floor(G.cameraPos.xz / cellSize);
   let cellXZ = home + vec2f(f32(c % across), f32(c / across)) - vec2f(f32(across / 2u));
 
+  // Grass grows in tufts, not scattered evenly over the ground: a block of
+  // cells shares one anchor point and a chance of carrying no tuft at all, so
+  // the sward reads as clumps with soil showing between them rather than a
+  // lawn. Blades within a tuft land in a disc around the anchor rather than
+  // spread across their own cell, which is what turns the per-cell window
+  // into visible bunches.
+  let tuftCells = 3.0;
+  let tuftCell = floor(cellXZ / tuftCells);
+  let tc1 = hash21(tuftCell * 0.913 + vec2f(5.31, 17.07));
+  let tc2 = hash21(tuftCell * 1.531 + vec2f(29.71, 3.19));
+  let tuftExists = hash21(tuftCell * 2.117 + vec2f(41.03, 61.87)) > 0.32;
+  let tuftRadius = cellSize * tuftCells *
+    mix(0.20, 0.42, hash21(tuftCell * 3.301 + vec2f(9.41, 71.23)));
+  let tuftCentre = (tuftCell * tuftCells + vec2f(tc1, tc2) * tuftCells) * cellSize;
+
   let h1 = hash21(cellXZ * 1.37 + vec2f(f32(b) * 7.13, f32(b) * 3.71));
   let h2 = hash21(cellXZ * 2.71 + vec2f(f32(b) * 1.93 + 11.0, f32(b) * 5.17));
   let h3 = hash21(cellXZ * 0.83 + vec2f(f32(b) * 9.41 + 31.0, f32(b) * 2.29));
-  let base = vec3f((cellXZ.x + h1) * cellSize, 0.0, (cellXZ.y + h2) * cellSize);
+  let h4 = hash21(cellXZ * 1.93 + vec2f(f32(b) * 3.47 + 53.0, f32(b) * 6.61));
+  let h5 = hash21(cellXZ * 4.19 + vec2f(f32(b) * 8.03 + 23.0, f32(b) * 1.27));
+  // Uniform over the tuft's disc: sqrt(h) so the sample density stays even
+  // per unit area instead of piling up at the centre.
+  let tuftAng = h4 * 6.28318;
+  let tuftRad = tuftRadius * sqrt(h5);
+  let base = vec3f(tuftCentre.x + cos(tuftAng) * tuftRad, 0.0,
+                    tuftCentre.y + sin(tuftAng) * tuftRad);
 
   let toCam = base - G.cameraPos.xyz;
   let dist = max(1e-3, length(toCam));
@@ -81,7 +103,7 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   let widthPx = 0.0013 * G.screen.y / (2.0 * G.cameraPos.w * dist);
   let resolvable = widthPx / (1.0 + coc);
   let keep = clamp(resolvable * 2.2, 0.0, 1.0) * (1.0 - smoothstep(fade * 0.7, fade, dist));
-  let alive = select(0.0, 1.0, h3 < keep);
+  let alive = select(0.0, 1.0, h3 < keep && tuftExists);
 
   // Turf grows where the habitat says it does: rank and tall in the damp
   // shelter, short and sparse on the hard-grazed ground.
