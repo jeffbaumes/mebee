@@ -144,7 +144,7 @@ export class Renderer {
     const names = ['wind.wgsl', 'sky.wgsl', 'shadow.wgsl', 'plant.wgsl', 'floret.wgsl',
                    'pollen_sim.wgsl', 'pollen_draw.wgsl', 'dof.wgsl', 'bloom.wgsl',
                    'post.wgsl', 'grass.wgsl', 'ground.wgsl', 'impostor.wgsl'];
-    const sources = await Promise.all(names.map(load));
+    const sources = await Promise.all(names.map((n) => load(n)));
     const mod = (code, label) => device.createShaderModule({ code, label });
     const M = Object.fromEntries(names.map((n, i) =>
       [n.replace('.wgsl', ''), mod(sources[i], n)]));
