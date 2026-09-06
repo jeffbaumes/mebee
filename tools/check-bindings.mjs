@@ -77,5 +77,32 @@ for (const [shader, groups] of Object.entries(PIPELINES)) {
     problems++;
   }
 }
-console.log(problems ? `\n${problems} binding problem(s)` : '\nall shader bindings match their pipeline layouts');
+// --- storage struct sizes vs the JS packing --------------------------------
+// A struct of vec4f is laid out as contiguous floats, so getting the field
+// ORDER wrong in JS silently shifts every field. Sizes are all that can be
+// checked mechanically; the field order is pinned by named slot constants in
+// the packing code itself.
+const STRUCT_EXPECT = {
+  'FloretInstance': { file: 'floret.wgsl', jsFloats: 8, note: 'buildFloretInstances' },
+  'StemNode':       { file: 'stem.wgsl',   jsFloats: 16, note: 'stem chain init' },
+  'Mote':           { file: 'pollen_sim.wgsl', jsFloats: 8, note: 'pollen seeding' },
+};
+const FLOATS = { 'vec4f': 4, 'vec3f': 4, 'vec2f': 2, 'f32': 1, 'u32': 1, 'i32': 1 };
+for (const [name, want] of Object.entries(STRUCT_EXPECT)) {
+  const src = resolveIncludes(want.file);
+  const m = new RegExp(`struct\\s+${name}\\s*\\{([^}]*)\\}`).exec(src);
+  if (!m) { console.log(`struct ${name} not found in ${want.file}`); problems++; continue; }
+  let floats = 0;
+  for (const f of m[1].matchAll(/:\s*([A-Za-z0-9_<>]+)\s*,/g)) {
+    const n = FLOATS[f[1]];
+    if (n === undefined) { console.log(`struct ${name}: unhandled type ${f[1]}`); problems++; }
+    else floats += n;
+  }
+  if (floats !== want.jsFloats) {
+    console.log(`struct ${name}: WGSL is ${floats} floats but ${want.note} writes ${want.jsFloats}`);
+    problems++;
+  }
+}
+
+console.log(problems ? `\n${problems} problem(s)` : '\nall shader bindings and struct sizes match');
 process.exit(problems ? 1 : 0);

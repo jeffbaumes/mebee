@@ -20,9 +20,12 @@ const floret = F.buildDiscFloretMesh();
 const inst = F.buildFloretInstances();
 for (let n = 0; n < inst.count; n++) {
   const o = n * 8;
+  // Same slot order as struct FloretInstance in floret.wgsl. This preview
+  // previously indexed the buffer in source order and so rendered correctly
+  // while the shader did not -- which is precisely how the mismatch hid.
   const px = inst.data[o], py = inst.data[o+1], pz = inst.data[o+2];
-  const nx = inst.data[o+3], ny = inst.data[o+4], nz = inst.data[o+5];
-  const s = inst.data[o+6];
+  const s = inst.data[o+3];
+  const nx = inst.data[o+4], ny = inst.data[o+5], nz = inst.data[o+6];
   // Build a frame whose +Y is the dome normal.
   const up = [nx, ny, nz];
   let t = Math.abs(ny) > 0.99 ? [1,0,0] : [0,1,0];

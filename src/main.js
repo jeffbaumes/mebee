@@ -122,10 +122,11 @@ function bindControls() {
   document.getElementById('animate').addEventListener('change', (e) => {
     state.animate = e.target.checked;
   });
-  document.getElementById('panel-toggle').addEventListener('click', () => {
-    const panel = document.getElementById('panel');
-    panel.classList.toggle('collapsed');
-    panel.classList.toggle('expanded');
+  // Whole header toggles, so the target is a thumb rather than a 24px glyph.
+  const panel = document.getElementById('panel');
+  panel.classList.toggle('open', window.innerWidth > 560);
+  document.getElementById('panel-header').addEventListener('click', () => {
+    panel.classList.toggle('open');
   });
   document.getElementById('debugView').addEventListener('change', (e) => {
     state.debugView = parseInt(e.target.value, 10) || 0;

@@ -236,18 +236,30 @@ export function buildDiscFloretMesh() {
 }
 
 /**
+ * Field order of one FloretInstance, which MUST match the struct in
+ * floret.wgsl. WGSL packs a struct of two vec4f as eight contiguous floats, so
+ * `scale` belongs in slot 3 (the w of the first vec4), not after the normal.
+ *
+ *   struct FloretInstance {
+ *     posScale : vec4f,   // 0,1,2 = position   3 = scale
+ *     nrmRad   : vec4f,   // 4,5,6 = normal     7 = normalised radius
+ *   }
+ */
+export const FLORET_INSTANCE_FLOATS = 8;
+const FI = { posX: 0, posY: 1, posZ: 2, scale: 3, nrmX: 4, nrmY: 5, nrmZ: 6, radius: 7 };
+
+/**
  * Vogel's model: r = c*sqrt(n), theta = n * goldenAngle. The golden angle is
  * the only divergence that never lets florets fall into radial rows, which is
  * why every real capitulum shows the same interlocking Fibonacci spirals.
  *
- * @returns {{data: Float32Array, count: number}} 8 floats per instance:
- *   position(3), dome normal(3), scale(1), maturity(1)
+ * @returns {{data: Float32Array, count: number}}
  */
 export function buildFloretInstances(seed = 5) {
   const rng = makeRng(seed);
   const N = FLOWER.floretCount;
   const Rd = FLOWER.discRadius;
-  const data = new Float32Array(N * 8);
+  const data = new Float32Array(N * FLORET_INSTANCE_FLOATS);
 
   // Dome the disc slightly; y falls off toward the rim.
   const domeY = (rn) => FLOWER.discDome * Math.pow(Math.max(0, 1 - rn * rn), 0.70);
@@ -271,11 +283,19 @@ export function buildFloretInstances(seed = 5) {
     const spacing = Rd * Math.sqrt((2 * Math.PI) / (Math.sqrt(3) * N));
     const scale = spacing * 0.52 * rng.range(0.88, 1.12);
 
-    const o = n * 8;
-    data[o] = x; data[o + 1] = y; data[o + 2] = z;
-    data[o + 3] = nml[0]; data[o + 4] = nml[1]; data[o + 5] = nml[2];
-    data[o + 6] = scale;
-    data[o + 7] = rn;                              // normalised radius
+    // Written through named slots: the previous version laid the fields out in
+    // source order (pos, normal, scale, radius), which put the normal's x into
+    // the slot the shader reads as `scale`. Florets meant to be 1mm across
+    // rendered up to 1.9m, half of them inverted by a negative scale.
+    const o = n * FLORET_INSTANCE_FLOATS;
+    data[o + FI.posX] = x;
+    data[o + FI.posY] = y;
+    data[o + FI.posZ] = z;
+    data[o + FI.scale] = scale;
+    data[o + FI.nrmX] = nml[0];
+    data[o + FI.nrmY] = nml[1];
+    data[o + FI.nrmZ] = nml[2];
+    data[o + FI.radius] = rn;
   }
   return { data, count: N };
 }
