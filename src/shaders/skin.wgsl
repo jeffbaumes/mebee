@@ -35,6 +35,53 @@ fn frameApply(fr: Frame, v: vec3f) -> vec3f {
 struct Skinned { pos: vec3f, nrm: vec3f, tan: vec3f }
 
 /**
+ * Secondary motion for a lamina -- a petal or a leaf blade -- hinged at its
+ * attachment.
+ *
+ * This used to be a private oscillator per element: a random phase AND a random
+ * frequency, displacing along a fixed Lissajous curve in world space. Every
+ * petal therefore drifted in and out of step with its neighbours forever and
+ * swirled in a little ellipse, which reads as amoeboid rather than windblown.
+ *
+ * Now it samples the same wind field the stem integrates, so a gust that bends
+ * the stem also lifts the petals it carries. Three things make it read as one
+ * flower rather than N independent objects:
+ *   - a single oscillator shared by every lamina, so they beat together;
+ *   - a phase delay by azimuth, so the gust sweeps around the head instead of
+ *     striking all of it at once;
+ *   - displacement along the head's own up axis, so petals flap about their
+ *     attachment rather than orbiting.
+ * The per-element variant survives only as a small phase nudge, which keeps it
+ * from looking mechanical without decoupling anything.
+ */
+fn laminaFlex(fr: Frame, local: vec3f, axis: f32, variant: f32) -> vec3f {
+  if (axis <= 0.0) { return vec3f(0.0); }
+  let t = G.windParams.y;
+  let wind = windAt(fr.origin, t);
+  let speed = length(wind);
+  if (speed < 1e-5) { return vec3f(0.0); }
+  let wdir = wind / speed;
+
+  // Radial direction of this point within the lamina's own plane.
+  let radial = local - fr.y * dot(local, fr.y);
+  let rl = length(radial);
+  var outward = fr.x;
+  if (rl > 1e-6) { outward = radial / rl; }
+
+  // How square-on this lamina sits to the gust. The windward side presses
+  // down and the leeward side lifts, which is why a flag flies rather than
+  // flapping symmetrically about its pole.
+  let facing = dot(outward, wdir);
+
+  let phase = t * 6.5 - facing * 2.2 + variant * 1.1;
+  // Steady lean plus flutter, both riding the same gust.
+  let bend = (facing * 0.6 + sin(phase) * 0.4) * speed;
+  // Measured 8.5mm of tip travel at 0.0075, which is a third of a petal's
+  // length; 0.0055 lands near 6mm -- still clearly alive, no longer flailing.
+  return fr.y * bend * axis * axis * 0.0055;
+}
+
+/**
  * Bend a plant vertex with the stem.
  *
  * The mesh is authored against a straight canonical stem, so the offset from
@@ -53,14 +100,6 @@ fn skinToStem(restPos: vec3f, nrm: vec3f, tan: vec3f,
   out.nrm = normalize(frameApply(fr, nrm));
   out.tan = normalize(frameApply(fr, tan));
 
-  // Secondary flutter, scaled by how far the point is from its attachment.
-  let t = G.windParams.y;
-  let strength = G.windParams.x;
-  let phase = variant * 43.0 + t * (2.7 + variant * 1.4);
-  // 10mm of flutter reads as violent on a 23mm petal; at 4.5mm it is a
-  // tremble rather than a flap.
-  let amp = strength * 0.0045 * axis * axis;
-  let wobble = vec3f(sin(phase), sin(phase * 1.37 + 1.1) * 0.45, cos(phase * 0.91));
-  out.pos += wobble * amp;
+  out.pos += laminaFlex(fr, local, axis, variant);
   return out;
 }

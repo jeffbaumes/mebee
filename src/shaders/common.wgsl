@@ -175,6 +175,33 @@ fn skyAmbient(n: vec3f) -> vec3f {
   return max(c, vec3f(0.0)) / PI;
 }
 
+/**
+ * One coherent wind field sampled by everything in the scene.
+ *
+ * Gusts are travelling wavefronts, not per-object noise: `dot(p, dir)` puts a
+ * moving phase front across the world, so a gust visibly crosses the meadow
+ * and every plant it passes leans in turn. Per-object sine waves never sell
+ * wind, because the coherence between neighbours is the cue.
+ */
+fn windAt(p: vec3f, t: f32) -> vec3f {
+  let dir = normalize(vec3f(G.windParams.z, 0.0, G.windParams.w) + vec3f(1e-5, 0.0, 0.0));
+  let strength = G.windParams.x;
+
+  let phase = dot(p, dir) * 1.35 - t * 2.1;
+  let front = pow(0.5 + 0.5 * sin(phase), 3.0);
+  let breadth = fbm3(p * 0.7 + vec3f(0.0, 0.0, t * 0.3), 3);
+  let gust = front * (0.45 + 0.9 * breadth);
+
+  // Small-scale turbulence so nothing moves perfectly in lockstep.
+  let n = vec3f(
+    fbm3(p * 7.0 + vec3f(t * 1.7, 0.0, 0.0), 3),
+    fbm3(p * 7.0 + vec3f(0.0, t * 1.3, 11.0), 3),
+    fbm3(p * 7.0 + vec3f(0.0, 0.0, t * 1.9 + 23.0), 3),
+  ) - vec3f(0.5);
+
+  return dir * strength * (0.30 + 1.70 * gust) + n * strength * 0.55;
+}
+
 // ---------------------------------------------------------------------------
 // Shadows
 //
