@@ -1,17 +1,31 @@
 // Pass graph and GPU resources.
 //
 // Frame order:
-//   compute  stem solve (publishes landing sites) -> pollen advect
-//   raster   shadow depth -> sky + plant + florets + pollen (HDR)
+//   cull     choose what to draw and at what detail (render/lod.js, on the CPU)
+//   compute  stem solve for every plant (publishes landing sites) -> pollen
+//   raster   shadow depth -> sky + ground + grass + plants + florets
+//            + impostors (HDR)
 //   post     DoF prepare/gather -> bloom down/up -> composite to the canvas
+//
+// The field is several hundred plants and six species. What keeps that a fixed
+// cost is that nothing about a plant is baked: one set of meshes per species,
+// one instance buffer for the whole meadow, one compute dispatch for every
+// stem, and a per-frame draw list that says which plants to draw at which of
+// three index buffers. See render/lod.js for how that list is chosen.
 
 import { createBuffer, makeMipGenerator, mipCount, makeShaderLoader } from '../gpu/device.js';
 import { VERTEX_STRIDE } from '../geom/mesh.js';
 import * as F from '../geom/flower.js';
+import { SPECIES, headRadius as speciesHeadRadius, rayCount, silhouetteRays }
+  from '../geom/species.js';
+import { growField, packPlantInstances, bakeHabitatMap } from '../geom/field.js';
 import { growVenation, bakeLeafMaps } from '../geom/venation.js';
-import { buildGrassBladeMesh, buildGrassInstances } from '../geom/grass.js';
+import { buildGrassBladeMesh } from '../geom/grass.js';
 import { BOUNDS } from '../sim/flight.js';
-import { projectSkySH, shToIrradiance } from './sky.js';
+import { HeadSites, SITE_FLOATS } from '../sim/sites.js';
+import { LodSelector, TIER, VISIBLE_WORDS } from './lod.js';
+import { SENSOR_HEIGHT } from './camera.js';
+import { projectSkySH, shToIrradiance, skyRadiance, ATMOSPHERE } from './sky.js';
 import { mat4, lookAt, ortho, multiply, normalize } from './math.js';
 
 // Refresh intervals real displays run at, never longer than the 1/60 the stem
@@ -26,14 +40,44 @@ const POLLEN_COUNT = 6000;
 const BLOOM_LEVELS = 6;
 const STEM_NODES = 16;
 
+/** The meadow. Its extent is the flight volume's, so there is one answer. */
+const FIELD_HALF = Math.max(BOUNDS.max[0], BOUNDS.max[2]);
+const PLANT_TARGET = 700;
+const HABITAT_SIZE = 256;
+
+/** Instance stride the floret draw multiplexes on; must match floret.wgsl. */
+const FLORETS_PER_PLANT = 1024;
+
+/**
+ * Grass window. The blades are hashed out of a world grid inside a square of
+ * cells that follows the camera (see grass.wgsl), so this is the whole cost of
+ * ground cover however big the field is: `perCell * across^2` instances, of
+ * which the lens-driven thinning in the vertex shader collapses most.
+ */
+const GRASS = { cell: 0.055, perCell: 8, across: 45, fade: 1.30 };
+const GRASS_CELLS = GRASS.across * GRASS.across;
+
+/**
+ * Extinction per metre for the aerial term.
+ *
+ * Real air over seven metres does essentially nothing, so this is a small
+ * deliberate exaggeration: enough that the far side of the meadow sits behind
+ * the near side, not so much that it looks foggy. See aerial() in common.wgsl.
+ */
+const AERIAL = 0.03;
+
+/** Ground disc tessellation; must match RINGS/SECTORS in ground.wgsl. */
+const GROUND_VERTS = 44 * 72 * 6;
+
 // Globals uniform layout, in floats. Must match struct Globals in common.wgsl.
 const G = {
   viewProj: 0, invViewProj: 16, view: 32, sunViewProj: 48,
   cameraPos: 64, sunDir: 68, sunColor: 72,
   shL0: 76, shL1y: 80, shL1z: 84, shL1x: 88,
   lens: 92, windParams: 96, state: 100, screen: 104,
-  shadowParam: 108, plant: 112, proj: 116, post: 120,
-  SIZE_FLOATS: 124,
+  shadowParam: 108, plant: 112, field: 116, hazeSun: 120, hazeAway: 124,
+  proj: 128, post: 132,
+  SIZE_FLOATS: 136,
 };
 
 const VERTEX_LAYOUT = {
@@ -49,7 +93,19 @@ const VERTEX_LAYOUT = {
   ],
 };
 
-/** Material uniform: albedo(4), transmit(4), surface(4), flags(4). */
+/** Plant parts, in the order they are drawn, with the material each wears. */
+const PARTS = [
+  { key: 'stem', material: 'stem' },
+  { key: 'leafA', material: 'leaf' },
+  { key: 'leafB', material: 'leaf' },
+  { key: 'receptacle', material: 'receptacle' },
+  { key: 'ray', material: 'ray' },
+];
+
+/**
+ * Material uniform: what is true of a KIND of tissue, not of one flower.
+ * Pigment comes off the plant instance -- see plant.wgsl.
+ */
 function material(device, { albedo, cutoff = 0.5, transmit, thickness = 1,
                             roughness, aniso = 0, spec = 0.04, sheen = 0.5,
                             kind, veinStrength = 1, mottle = 0.2, label }) {
@@ -72,6 +128,8 @@ export class Renderer {
     this.generateMips = makeMipGenerator(device);
     this.sunSH = null;
     this.lastSunKey = '';
+    this.lodBias = 1.0;
+    this.grassDensity = 1.0;
   }
 
   static async create(device, context, format, canvas) {
@@ -83,22 +141,13 @@ export class Renderer {
   async init() {
     const { device } = this;
     const load = await makeShaderLoader();
-    const [windSrc, skySrc, shadowSrc, plantSrc, floretSrc, pollenSimSrc,
-           pollenDrawSrc, dofSrc, bloomSrc, postSrc] = await Promise.all([
-      load('wind.wgsl'), load('sky.wgsl'), load('shadow.wgsl'), load('plant.wgsl'),
-      load('floret.wgsl'), load('pollen_sim.wgsl'), load('pollen_draw.wgsl'),
-      load('dof.wgsl'), load('bloom.wgsl'), load('post.wgsl'),
-    ]);
-    const grassSrc = await load('grass.wgsl');
+    const names = ['wind.wgsl', 'sky.wgsl', 'shadow.wgsl', 'plant.wgsl', 'floret.wgsl',
+                   'pollen_sim.wgsl', 'pollen_draw.wgsl', 'dof.wgsl', 'bloom.wgsl',
+                   'post.wgsl', 'grass.wgsl', 'ground.wgsl', 'impostor.wgsl'];
+    const sources = await Promise.all(names.map(load));
     const mod = (code, label) => device.createShaderModule({ code, label });
-    const M = {
-      wind: mod(windSrc, 'wind'), sky: mod(skySrc, 'sky'), shadow: mod(shadowSrc, 'shadow'),
-      plant: mod(plantSrc, 'plant'), floret: mod(floretSrc, 'floret'),
-      pollenSim: mod(pollenSimSrc, 'pollenSim'),
-      pollenDraw: mod(pollenDrawSrc, 'pollenDraw'), dof: mod(dofSrc, 'dof'),
-      bloom: mod(bloomSrc, 'bloom'), post: mod(postSrc, 'post'),
-      grass: mod(grassSrc, 'grass'),
-    };
+    const M = Object.fromEntries(names.map((n, i) =>
+      [n.replace('.wgsl', ''), mod(sources[i], n)]));
 
     this.buildGeometry();
     this.buildTextures();
@@ -112,66 +161,126 @@ export class Renderer {
     const { device } = this;
     const usage = GPUBufferUsage.VERTEX;
     const iusage = GPUBufferUsage.INDEX;
+
+    /** Upload one mesh: shared vertices, one index buffer per level of detail. */
     const upload = (mesh, label) => ({
       vertex: createBuffer(device, mesh.vertices, usage, `${label}.v`),
-      index: createBuffer(device, mesh.indices, iusage, `${label}.i`),
-      indexFormat: mesh.indexFormat,
-      count: mesh.indexCount,
+      lods: mesh.lods.map((l, i) => ({
+        index: createBuffer(device, l.indices, iusage, `${label}.i${i}`),
+        indexFormat: l.indexFormat,
+        count: l.indexCount,
+      })),
     });
 
-    this.parts = {
-      ray: upload(F.buildRayMesh(), 'ray'),
-      receptacle: upload(F.buildReceptacleMesh(), 'receptacle'),
-      stem: upload(F.buildStemMesh(), 'stem'),
-      leafA: upload(F.buildLeafMesh(0.046, F.FLOWER.stemHeight * 0.58, 0.65, 17), 'leafA'),
-      leafB: upload(F.buildLeafMesh(0.037, F.FLOWER.stemHeight * 0.37, -2.05, 29), 'leafB'),
-      floret: upload(F.buildDiscFloretMesh(), 'floret'),
-    };
+    // --- the six species -------------------------------------------------
+    // One set of meshes each, shared by every individual of that species. All
+    // the variation -- size, height, pigment, phenology -- is in the instance.
+    const floretBlocks = [];
+    let floretBase = 0;
+    this.species = SPECIES.map((s) => {
+      const meshes = F.buildSpeciesMeshes(s);
+      const parts = {};
+      for (const { key } of PARTS) {
+        if (meshes[key]) parts[key] = upload(meshes[key], `${s.key}.${key}`);
+      }
+      floretBlocks.push(meshes.florets.data);
+      const info = {
+        key: s.key,
+        parts,
+        floretBase,
+        floretCount: meshes.florets.count,
+        headRadius: speciesHeadRadius(s),
+        rayCount: rayCount(s),
+        silhouetteRays: silhouetteRays(s),
+      };
+      // The floret draw multiplexes plant and floret onto one instance index
+      // with a constant stride, so no species may exceed it.
+      if (info.floretCount > FLORETS_PER_PLANT) {
+        throw new Error(`${s.key}: ${info.floretCount} florets exceeds the ` +
+                        `${FLORETS_PER_PLANT} instance stride`);
+      }
+      floretBase += meshes.florets.count;
+      return info;
+    });
 
-    // Grass fills the play volume, so the flight bounds are the source of
-    // truth for where it goes -- no second copy of the world's extent.
-    this.parts.grass = upload(buildGrassBladeMesh(), 'grass');
-    const grass = buildGrassInstances(BOUNDS);
-    this.grassCount = grass.count;
-    this.grassBuffer = createBuffer(device, grass.data, GPUBufferUsage.STORAGE, 'grass');
+    // Every species' Vogel table, back to back: the plant instance carries its
+    // own block's offset, so one bind group serves the whole field.
+    const allFlorets = new Float32Array(floretBlocks.reduce((n, b) => n + b.length, 0));
+    {
+      let o = 0;
+      for (const b of floretBlocks) { allFlorets.set(b, o); o += b.length; }
+    }
+    this.floretBuffer = createBuffer(device, allFlorets, GPUBufferUsage.STORAGE, 'florets');
+    this.parts = { floret: upload(F.buildDiscFloretMesh(), 'floret'),
+                   grass: upload(buildGrassBladeMesh(), 'grass') };
 
-    const inst = F.buildFloretInstances();
-    this.floretCount = inst.count;
-    this.floretBuffer = createBuffer(device, inst.data, GPUBufferUsage.STORAGE, 'florets');
+    // --- the field ---------------------------------------------------------
+    this.field = growField({ min: BOUNDS.min, max: BOUNDS.max }, { target: PLANT_TARGET });
+    this.plants = this.field.plants;
+    this.plantCount = this.plants.length;
+    const packed = packPlantInstances(this.plants, this.species);
+    this.plantBuffer = createBuffer(device, packed.data, GPUBufferUsage.STORAGE, 'plants');
+    this.lod = new LodSelector(this.plants, SPECIES.length);
 
-    // Stem chain, initialised straight and at rest.
-    const nodes = new Float32Array(STEM_NODES * 16);
-    this.stemSegment = F.FLOWER.stemHeight / (STEM_NODES - 1);
-    for (let i = 0; i < STEM_NODES; i++) {
-      const y = i * this.stemSegment;
-      const o = i * 16;
-      nodes[o] = 0; nodes[o + 1] = y; nodes[o + 2] = 0; nodes[o + 3] = i / (STEM_NODES - 1);
-      nodes[o + 4] = 0; nodes[o + 5] = y; nodes[o + 6] = 0;
-      nodes[o + 8] = 0; nodes[o + 9] = 1; nodes[o + 10] = 0;   // axis +Y
-      nodes[o + 12] = 1; nodes[o + 13] = 0; nodes[o + 14] = 0; // side +X
+    // This frame's draw list. Rewritten every frame from the CPU, and read by
+    // the shadow pass, the plant pass, the floret pass and the impostors --
+    // one list, so they cannot disagree about what is being drawn.
+    this.visibleBuffer = device.createBuffer({
+      label: 'visible',
+      size: Math.max(16, this.plantCount * VISIBLE_WORDS * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    // --- stem chains -------------------------------------------------------
+    // One 16-node chain per plant, packed back to back and initialised along
+    // that plant's own leaning rest axis.
+    const nodes = new Float32Array(this.plantCount * STEM_NODES * 16);
+    for (let p = 0; p < this.plantCount; p++) {
+      const plant = this.plants[p];
+      const sinL = Math.sin(plant.lean), cosL = Math.cos(plant.lean);
+      const ax = Math.cos(plant.leanDir) * sinL, ay = cosL, az = Math.sin(plant.leanDir) * sinL;
+      const seg = plant.stemHeight / (STEM_NODES - 1);
+      for (let i = 0; i < STEM_NODES; i++) {
+        const o = (p * STEM_NODES + i) * 16;
+        const x = plant.x + ax * seg * i;
+        const y = ay * seg * i;
+        const z = plant.z + az * seg * i;
+        nodes[o] = x; nodes[o + 1] = y; nodes[o + 2] = z;
+        nodes[o + 3] = i / (STEM_NODES - 1);
+        nodes[o + 4] = x; nodes[o + 5] = y; nodes[o + 6] = z;
+        nodes[o + 8] = ax; nodes[o + 9] = ay; nodes[o + 10] = az;
+        // Any unit vector square to the axis will do as the initial side; the
+        // solver re-derives it by parallel transport on the first frame.
+        nodes[o + 12] = 1; nodes[o + 13] = 0; nodes[o + 14] = 0;
+      }
     }
     this.stemBuffer = createBuffer(device, nodes,
       GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
       'stemNodes');
-    // LandingSite is now four vec4f.
-    this.landingBytes = 4 * 4 * 4;
+
+    // --- landing sites -----------------------------------------------------
+    // One per plant. Small enough (a few tens of kilobytes) to read the whole
+    // table back every frame, which is what lets the flight model ask "which
+    // flower is nearest" against geometry that is actually swaying.
+    this.landingBytes = this.plantCount * SITE_FLOATS * 4;
     this.landingBuffer = device.createBuffer({
       label: 'landingSites',
-      size: this.landingBytes,
+      size: Math.max(64, this.landingBytes),
       usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
     });
-    // Ring of staging buffers so the head's frame can be read back every frame
+    // Ring of staging buffers so the table can be read back every frame
     // without ever blocking on a map. Two or three frames of latency is
-    // invisible at the speed the flower sways, and it beats duplicating the
+    // invisible at the speed the flowers sway, and it beats duplicating the
     // solver on the CPU, where float differences would let the crawl surface
     // drift away from the flower actually being drawn.
     this.landingStaging = Array.from({ length: 3 }, () => device.createBuffer({
-      size: this.landingBytes,
+      size: Math.max(64, this.landingBytes),
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     }));
     this.landingFree = [0, 1, 2];
-    /** @type {{pos:number[], up:number[], side:number[], velocity:number[]}|null} */
-    this.headFrame = null;
+    this.sites = new HeadSites(this.plantCount);
+    this.sites.count = 0;
+
     // Stem solver step. Exactly one step runs per frame; this is how long it
     // is. See updateSolveStep, and tools/sim-stem.mjs for the measurements.
     this.frameAvg = 1 / 60;
@@ -182,14 +291,14 @@ export class Renderer {
     // frame that took 50ms cannot jump any of them forward 50ms.
     this.simTime = 0;
 
-    // Pollen motes, seeded through the volume around the flower.
+    // Pollen motes. Seeded near the origin and recycled around the camera by
+    // pollen_sim.wgsl, so the same six thousand follow the bee across the field.
     const motes = new Float32Array(POLLEN_COUNT * 8);
     for (let i = 0; i < POLLEN_COUNT; i++) {
       const o = i * 8;
-      // Seeded across the play volume so motes are wherever the bee flies.
-      motes[o] = BOUNDS.min[0] + Math.random() * (BOUNDS.max[0] - BOUNDS.min[0]);
-      motes[o + 1] = Math.random() * (BOUNDS.max[1] + 0.05);
-      motes[o + 2] = BOUNDS.min[2] + Math.random() * (BOUNDS.max[2] - BOUNDS.min[2]);
+      motes[o] = (Math.random() - 0.5) * 1.0;
+      motes[o + 1] = Math.random() * 0.5;
+      motes[o + 2] = (Math.random() - 0.5) * 1.0;
       motes[o + 3] = 0.00006 + Math.random() * 0.00016;   // 60-220 micron
       motes[o + 7] = Math.random();
     }
@@ -201,21 +310,27 @@ export class Renderer {
     const ven = growVenation(undefined, { seed: 1 });
     const maps = bakeLeafMaps(ven, 1024, { seed: 3, holes: 2 });
     const size = maps.size;
-    const levels = mipCount(size, size);
 
-    const makeMap = (data, label) => {
+    const makeMap = (data, w, label, mips = true) => {
+      const n = mips ? mipCount(w, w) : 1;
       const tex = device.createTexture({
-        label, size: [size, size], format: 'rgba8unorm', mipLevelCount: levels,
+        label, size: [w, w], format: 'rgba8unorm', mipLevelCount: n,
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST |
                GPUTextureUsage.RENDER_ATTACHMENT,
       });
       device.queue.writeTexture({ texture: tex }, data,
-        { bytesPerRow: size * 4, rowsPerImage: size }, [size, size]);
-      this.generateMips(tex, 'rgba8unorm', levels);
+        { bytesPerRow: w * 4, rowsPerImage: w }, [w, w]);
+      if (n > 1) this.generateMips(tex, 'rgba8unorm', n);
       return tex;
     };
-    this.veinTexture = makeMap(maps.veinMap, 'veinMap');
-    this.detailTexture = makeMap(maps.detailMap, 'detailMap');
+    this.veinTexture = makeMap(maps.veinMap, size, 'veinMap');
+    this.detailTexture = makeMap(maps.detailMap, size, 'detailMap');
+
+    // The habitat, baked from the same fields geom/field.js sampled to place
+    // the plants. The ground shader and the grass read it, so the turf agrees
+    // with what is growing in it rather than merely resembling it.
+    const hab = bakeHabitatMap(FIELD_HALF, HABITAT_SIZE);
+    this.habitatTexture = makeMap(hab.data, hab.size, 'habitat', false);
 
     this.linearSampler = device.createSampler({
       magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'linear',
@@ -244,6 +359,9 @@ export class Renderer {
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    // Kind-level tissue properties only. The albedo and transmit fields here
+    // are fallbacks the instanced path overrides; what actually matters is the
+    // roughness, the anisotropy, and how strongly the veins deform the normal.
     const mat = (o) => material(device, o);
     this.materials = {
       ray: mat({
@@ -282,40 +400,39 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
         { binding: 3, visibility: VF, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: VF, texture: { sampleType: 'float' } },
       ],
     });
-    this.bglPlant = device.createBindGroupLayout({
-      label: 'plant',
+    // Everything that draws a plant binds exactly this: the solved chains, the
+    // field, and this frame's draw list.
+    this.bglScene = device.createBindGroupLayout({
+      label: 'scene',
       entries: [
-        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+        { binding: 0, visibility: VF, buffer: { type: 'read-only-storage' } },
+        { binding: 1, visibility: VF, buffer: { type: 'read-only-storage' } },
+        { binding: 2, visibility: VF, buffer: { type: 'read-only-storage' } },
+      ],
+    });
+    this.bglPlantTex = device.createBindGroupLayout({
+      label: 'plantTex',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       ],
     });
-    this.bglStemOnly = device.createBindGroupLayout({
-      label: 'stemOnly',
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }],
-    });
-    this.bglFloret = device.createBindGroupLayout({
-      label: 'floret',
+    this.bglFloretDisc = device.createBindGroupLayout({
+      label: 'floretDisc',
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
-        { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
-    });
-    this.bglGrass = device.createBindGroupLayout({
-      label: 'grass',
-      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }],
-    });
-    this.bglMaterial = device.createBindGroupLayout({
-      label: 'material',
-      entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
     });
     this.bglWind = device.createBindGroupLayout({
       label: 'wind',
       entries: [
         { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
         { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
       ],
     });
     this.bglPollenCompute = device.createBindGroupLayout({
@@ -356,6 +473,13 @@ export class Renderer {
     const { device } = this;
     const pl = (...layouts) => device.createPipelineLayout({ bindGroupLayouts: layouts });
     const depthOn = { format: DEPTH_FORMAT, depthWriteEnabled: true, depthCompare: 'less' };
+    const opaque = (label, module, layout) => device.createRenderPipeline({
+      label, layout,
+      vertex: { module, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+      primitive: { topology: 'triangle-list' },
+      depthStencil: depthOn,
+    });
 
     this.pipelines = {
       wind: device.createComputePipeline({
@@ -366,11 +490,11 @@ export class Renderer {
       pollenUpdate: device.createComputePipeline({
         label: 'pollenUpdate',
         layout: pl(this.bgl0, this.bglPollenCompute),
-        compute: { module: M.pollenSim, entryPoint: 'update' },
+        compute: { module: M.pollen_sim, entryPoint: 'update' },
       }),
       shadow: device.createRenderPipeline({
         label: 'shadow',
-        layout: pl(this.bgl0, this.bglStemOnly),
+        layout: pl(this.bgl0, this.bglScene),
         vertex: { module: M.shadow, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
@@ -384,36 +508,44 @@ export class Renderer {
         // Drawn first, filling the frame; never occludes the geometry over it.
         depthStencil: { format: DEPTH_FORMAT, depthWriteEnabled: false, depthCompare: 'always' },
       }),
-      plant: device.createRenderPipeline({
-        label: 'plant',
-        layout: pl(this.bgl0, this.bglPlant, this.bglMaterial),
-        vertex: { module: M.plant, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
-        fragment: { module: M.plant, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+      ground: device.createRenderPipeline({
+        label: 'ground',
+        layout: pl(this.bgl0),
+        vertex: { module: M.ground, entryPoint: 'vs' },
+        fragment: { module: M.ground, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
       }),
-      grass: device.createRenderPipeline({
-        label: 'grass',
-        layout: pl(this.bgl0, this.bglGrass),
-        vertex: { module: M.grass, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
-        fragment: { module: M.grass, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
-        primitive: { topology: 'triangle-list' },
-        depthStencil: depthOn,
-      }),
-      floret: device.createRenderPipeline({
-        label: 'floret',
-        layout: pl(this.bgl0, this.bglFloret),
-        vertex: { module: M.floret, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
-        fragment: { module: M.floret, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+      plant: opaque('plant', M.plant, pl(this.bgl0, this.bglScene, this.bglPlantTex)),
+      grass: opaque('grass', M.grass, pl(this.bgl0)),
+      floret: opaque('floret', M.floret, pl(this.bgl0, this.bglScene, this.bglFloretDisc)),
+      impostor: device.createRenderPipeline({
+        label: 'impostor',
+        layout: pl(this.bgl0, this.bglScene),
+        vertex: { module: M.impostor, entryPoint: 'vs' },
+        fragment: {
+          module: M.impostor, entryPoint: 'fs',
+          targets: [{
+            format: HDR_FORMAT,
+            // Premultiplied over. The far field is soft-edged by definition,
+            // so it has to blend; the draw list is sorted back to front and
+            // depth is still written, so the defocus pass reads the head's own
+            // distance rather than whatever is behind it.
+            blend: {
+              color: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+              alpha: { srcFactor: 'one', dstFactor: 'one-minus-src-alpha', operation: 'add' },
+            },
+          }],
+        },
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
       }),
       pollen: device.createRenderPipeline({
         label: 'pollen',
         layout: pl(this.bgl0, this.bglPollenDraw),
-        vertex: { module: M.pollenDraw, entryPoint: 'vs' },
+        vertex: { module: M.pollen_draw, entryPoint: 'vs' },
         fragment: {
-          module: M.pollenDraw, entryPoint: 'fs',
+          module: M.pollen_draw, entryPoint: 'fs',
           targets: [{
             format: HDR_FORMAT,
             // Premultiplied additive: motes only ever add light.
@@ -479,6 +611,7 @@ export class Renderer {
       entries: [
         { binding: 0, resource: { buffer: this.stemBuffer } },
         { binding: 1, resource: { buffer: this.landingBuffer } },
+        { binding: 2, resource: { buffer: this.plantBuffer } },
       ],
     });
     this.bgPollenCompute = device.createBindGroup({
@@ -489,53 +622,40 @@ export class Renderer {
       layout: this.bglPollenDraw,
       entries: [{ binding: 0, resource: { buffer: this.pollenBuffer } }],
     });
-    this.bgPlant = device.createBindGroup({
-      layout: this.bglPlant,
+    this.bgScene = device.createBindGroup({
+      layout: this.bglScene,
       entries: [
         { binding: 0, resource: { buffer: this.stemBuffer } },
-        { binding: 1, resource: this.veinTexture.createView() },
-        { binding: 2, resource: this.detailTexture.createView() },
+        { binding: 1, resource: { buffer: this.plantBuffer } },
+        { binding: 2, resource: { buffer: this.visibleBuffer } },
       ],
     });
-    this.bgStemOnly = device.createBindGroup({
-      layout: this.bglStemOnly,
-      entries: [{ binding: 0, resource: { buffer: this.stemBuffer } }],
-    });
-    this.bgGrass = device.createBindGroup({
-      layout: this.bglGrass,
-      entries: [{ binding: 0, resource: { buffer: this.grassBuffer } }],
-    });
-    this.bgFloret = device.createBindGroup({
-      layout: this.bglFloret,
-      entries: [
-        { binding: 0, resource: { buffer: this.stemBuffer } },
-        { binding: 1, resource: { buffer: this.floretBuffer } },
-      ],
+    this.bgFloretDisc = device.createBindGroup({
+      layout: this.bglFloretDisc,
+      entries: [{ binding: 0, resource: { buffer: this.floretBuffer } }],
     });
     this.bgMaterials = Object.fromEntries(
       Object.entries(this.materials).map(([k, buf]) => [k, device.createBindGroup({
-        layout: this.bglMaterial,
-        entries: [{ binding: 0, resource: { buffer: buf } }],
+        layout: this.bglPlantTex,
+        entries: [
+          { binding: 0, resource: { buffer: buf } },
+          { binding: 1, resource: this.veinTexture.createView() },
+          { binding: 2, resource: this.detailTexture.createView() },
+        ],
       })]));
 
-    this.bg0Main = device.createBindGroup({
+    const common = (shadowView) => device.createBindGroup({
       layout: this.bgl0,
       entries: [
         { binding: 0, resource: { buffer: this.globalsBuffer } },
-        { binding: 1, resource: this.shadowTexture.createView() },
+        { binding: 1, resource: shadowView },
         { binding: 2, resource: this.shadowSampler },
         { binding: 3, resource: this.linearSampler },
+        { binding: 4, resource: this.habitatTexture.createView() },
       ],
     });
-    this.bg0Shadow = device.createBindGroup({
-      layout: this.bgl0,
-      entries: [
-        { binding: 0, resource: { buffer: this.globalsBuffer } },
-        { binding: 1, resource: this.dummyDepth.createView() },
-        { binding: 2, resource: this.shadowSampler },
-        { binding: 3, resource: this.linearSampler },
-      ],
-    });
+    this.bg0Main = common(this.shadowTexture.createView());
+    this.bg0Shadow = common(this.dummyDepth.createView());
 
     this.blurParams = [];
     for (let i = 0; i < BLOOM_LEVELS * 2; i++) {
@@ -632,11 +752,21 @@ export class Renderer {
 
   // -------------------------------------------------------------------------
   /** Sky irradiance is expensive to project, so only redo it when the sun moves. */
-  updateSkySH(sunDir) {
-    const key = sunDir.map((v) => v.toFixed(2)).join(',');
+  updateSkySH(sunDir, intensity) {
+    const key = `${sunDir.map((v) => v.toFixed(2)).join(',')}|${intensity.toFixed(1)}`;
     if (key === this.lastSunKey) return;
     this.lastSunKey = key;
     this.sunSH = shToIrradiance(projectSkySH(sunDir, 512));
+    // Horizon radiance looking into the sun and away from it. Precomputed on
+    // the same CPU atmosphere the sky shader mirrors, because evaluating it
+    // per fragment for every surface in the scene would cost more than the
+    // rest of the frame put together -- see aerial() in common.wgsl.
+    const flat = Math.hypot(sunDir[0], sunDir[2]) || 1;
+    const toward = [sunDir[0] / flat * 0.998, 0.06, sunDir[2] / flat * 0.998];
+    const away = [-toward[0], 0.06, -toward[2]];
+    const k = intensity / ATMOSPHERE.sunIntensity;
+    this.hazeSun = skyRadiance(normalize([...toward]), sunDir).map((v) => v * k);
+    this.hazeAway = skyRadiance(normalize([...away]), sunDir).map((v) => v * k);
   }
 
   /**
@@ -649,8 +779,8 @@ export class Renderer {
    * gains energy if the step grows. Hence snapping to a standard refresh
    * interval, with hysteresis so a display sitting between two rates cannot
    * flip back and forth, and a 1/60 ceiling because that is what the wind
-   * constants were tuned against. A slow machine runs the plant slow, which
-   * reads as a calm day; running it with a longer step reads as a broken one.
+   * constants were tuned against. A slow machine runs the plants slow, which
+   * reads as a calm day; running them with a longer step reads as a broken one.
    */
   updateSolveStep(dt) {
     const clamped = Math.min(1 / 45, Math.max(1 / 240, dt));
@@ -663,7 +793,7 @@ export class Renderer {
     this.simTime += this.solveStep;
   }
 
-  updateGlobals(camera, state, dt) {
+  updateGlobals(camera, state) {
     const g = this.globals;
     const el = state.sunElevation, az = state.sunAzimuth;
     const sunDir = normalize([
@@ -671,17 +801,25 @@ export class Renderer {
       Math.sin(el),
       Math.cos(el) * Math.cos(az),
     ]);
-    this.updateSkySH(sunDir);
+    this.updateSkySH(sunDir, state.sunIntensity);
 
-    // Sun view-projection, fitted around the whole plant.
-    //
-    // Two bugs lived here: the eye's height was set to sunDir.y * dist with no
-    // base offset, putting the "sun" below the point it looked at so the scene
-    // was lit and shadowed from underneath; and the ortho half-extent was 0.115
-    // for a plant 0.40m tall, so most of the stem fell outside the shadow map.
-    const HALF = F.FLOWER.stemHeight * 0.95, NEAR = 0.02, FAR = 1.2;
-    const centre = [camera.target[0], F.FLOWER.stemHeight * 0.55, camera.target[2]];
-    const dist = 0.8;
+    // Sun view-projection, fitted around the camera's own neighbourhood rather
+    // than around one plant. A field seven metres across cannot have a shadow
+    // map fitted to it and still resolve a petal -- at 2048 square this covers
+    // a metre with a half-millimetre texel, which is right for the handful of
+    // plants near enough to cast a shadow anyone can see.
+    const HALF = 0.50, NEAR = 0.02, FAR = 2.6;
+    // Camera forward, out of this frame's view matrix rather than last
+    // frame's: lookAt puts the backward axis in the third row.
+    const V = camera.view;
+    const fwd = [-V[2], -V[6], -V[10]];
+    const look = Math.min(0.45, Math.max(0.10, camera.focusDistance));
+    const centre = [
+      camera.position[0] + fwd[0] * look,
+      0.10,
+      camera.position[2] + fwd[2] * look,
+    ];
+    const dist = 1.2;
     const eye = [
       centre[0] + sunDir[0] * dist,
       centre[1] + sunDir[1] * dist,
@@ -707,12 +845,15 @@ export class Renderer {
     g.set([...sh[2], 0], G.shL1z);
     g.set([...sh[3], 0], G.shL1x);
 
-    g.set([camera.focusDistance, camera.fNumber, camera.focalLength, 0.024], G.lens);
+    g.set([camera.focusDistance, camera.fNumber, camera.focalLength, SENSOR_HEIGHT], G.lens);
     g.set([state.wind, this.simTime, Math.cos(state.windDir), Math.sin(state.windDir)], G.windParams);
     g.set([state.bloom, state.floretFront, state.exposure, this.solveStep], G.state);
     g.set([this.width, this.height, 1 / this.width, 1 / this.height], G.screen);
     g.set([HALF, FAR - NEAR, 0, 0.0016], G.shadowParam);
-    g.set([F.FLOWER.stemHeight, this.stemSegment, 0, state.debugView ?? 0], G.plant);
+    g.set([this.plantCount, FIELD_HALF, this.lodBias, state.debugView ?? 0], G.plant);
+    g.set([GRASS.cell, 1.0, GRASS.across, GRASS.fade], G.field);
+    g.set([...this.hazeSun, AERIAL], G.hazeSun);
+    g.set([...this.hazeAway, 0], G.hazeAway);
 
     const { A, B } = camera.depthParams;
     g.set([camera.near, camera.far, A, B], G.proj);
@@ -721,19 +862,36 @@ export class Renderer {
     this.device.queue.writeBuffer(this.globalsBuffer, 0, g);
   }
 
-  /** Draw one plant part with its material. */
-  drawPart(pass, part, materialKey) {
-    pass.setBindGroup(2, this.bgMaterials[materialKey]);
+  /** Draw one run of plants: every part of one species at one tier. */
+  drawRun(pass, run, partKey) {
+    const part = this.species[run.species].parts[partKey];
+    if (!part) return 0;
+    const lod = part.lods[Math.min(run.tier, part.lods.length - 1)];
+    if (lod.count === 0) return 0;
     pass.setVertexBuffer(0, part.vertex);
-    pass.setIndexBuffer(part.index, part.indexFormat);
-    pass.drawIndexed(part.count);
+    pass.setIndexBuffer(lod.index, lod.indexFormat);
+    // firstInstance is the run's base in the visible list. WebGPU's
+    // instance_index starts at firstInstance, so the shader reads the right
+    // slice with no per-draw uniform and no dynamic offset.
+    pass.drawIndexed(lod.count, run.count, 0, 0, run.base);
+    return (lod.count / 3) * run.count;
   }
 
   render(camera, state, dt) {
     const { device } = this;
     this.resize();
     this.updateSolveStep(dt);
-    this.updateGlobals(camera, state, dt);
+    this.updateGlobals(camera, state);
+
+    // --- choose what to draw ----------------------------------------------
+    // Before anything is encoded: the same list feeds the shadow pass, the
+    // main pass and the impostors.
+    const lod = this.lod;
+    lod.bias = this.lodBias;
+    lod.select(camera, this.height, SENSOR_HEIGHT, state.pinnedPlant ?? -1);
+    if (lod.byteLength > 0) {
+      device.queue.writeBuffer(this.visibleBuffer, 0, lod.buffer, 0, lod.byteLength);
+    }
 
     const encoder = device.createCommandEncoder({ label: 'frame' });
     const P = this.pipelines;
@@ -744,7 +902,8 @@ export class Renderer {
       pass.setBindGroup(0, this.bg0Main);
       pass.setPipeline(P.wind);
       pass.setBindGroup(1, this.bgWind);
-      pass.dispatchWorkgroups(1);          // one workgroup owns the whole chain
+      // One workgroup per plant; the workgroup size is the chain length.
+      pass.dispatchWorkgroups(this.plantCount);
       pass.setPipeline(P.pollenUpdate);
       pass.setBindGroup(1, this.bgPollenCompute);
       pass.dispatchWorkgroups(Math.ceil(POLLEN_COUNT / 64));
@@ -752,6 +911,9 @@ export class Renderer {
     }
 
     // --- shadow -----------------------------------------------------------
+    // Only the two finest tiers cast. A plant coarse enough to be a few
+    // triangles is also far enough that its shadow is off the map, and the
+    // impostors have no geometry to cast with.
     {
       const pass = encoder.beginRenderPass({
         label: 'shadow',
@@ -763,17 +925,17 @@ export class Renderer {
       });
       pass.setPipeline(P.shadow);
       pass.setBindGroup(0, this.bg0Shadow);
-      pass.setBindGroup(1, this.bgStemOnly);
-      for (const key of ['ray', 'receptacle', 'stem', 'leafA', 'leafB']) {
-        const part = this.parts[key];
-        pass.setVertexBuffer(0, part.vertex);
-        pass.setIndexBuffer(part.index, part.indexFormat);
-        pass.drawIndexed(part.count);
+      pass.setBindGroup(1, this.bgScene);
+      for (const { key } of PARTS) {
+        for (const run of lod.runs) {
+          if (run.tier <= TIER.MID) this.drawRun(pass, run, key);
+        }
       }
       pass.end();
     }
 
     // --- main -------------------------------------------------------------
+    let triangles = 0;
     {
       const pass = encoder.beginRenderPass({
         label: 'main',
@@ -791,33 +953,61 @@ export class Renderer {
       pass.setPipeline(P.sky);
       pass.draw(3);
 
-      // Grass first: it is the backdrop, and drawing the near geometry after
-      // it lets early-z reject most of the sward behind the flower.
-      pass.setPipeline(P.grass);
-      pass.setBindGroup(1, this.bgGrass);
-      pass.setVertexBuffer(0, this.parts.grass.vertex);
-      pass.setIndexBuffer(this.parts.grass.index, this.parts.grass.indexFormat);
-      pass.drawIndexed(this.parts.grass.count, this.grassCount);
+      // Ground and grass first: they are the backdrop, and drawing the near
+      // geometry after them lets early-z reject most of the sward behind it.
+      pass.setPipeline(P.ground);
+      pass.draw(GROUND_VERTS);
+
+      // Grass is blade-major in the instance index (see grass.wgsl), so
+      // trimming the instance count lifts whole layers off the sward evenly
+      // rather than cutting the window in half.
+      const layers = Math.round(GRASS.perCell * this.grassDensity);
+      if (layers > 0) {
+        pass.setPipeline(P.grass);
+        pass.setVertexBuffer(0, this.parts.grass.vertex);
+        const blade = this.parts.grass.lods[0];
+        pass.setIndexBuffer(blade.index, blade.indexFormat);
+        pass.drawIndexed(blade.count, layers * GRASS_CELLS);
+      }
 
       pass.setPipeline(P.plant);
-      pass.setBindGroup(1, this.bgPlant);
-      this.drawPart(pass, this.parts.stem, 'stem');
-      this.drawPart(pass, this.parts.leafA, 'leaf');
-      this.drawPart(pass, this.parts.leafB, 'leaf');
-      this.drawPart(pass, this.parts.receptacle, 'receptacle');
-      this.drawPart(pass, this.parts.ray, 'ray');
+      pass.setBindGroup(1, this.bgScene);
+      for (const { key, material: mat } of PARTS) {
+        pass.setBindGroup(2, this.bgMaterials[mat]);
+        for (const run of lod.runs) triangles += this.drawRun(pass, run, key);
+      }
 
-      pass.setPipeline(P.floret);
-      pass.setBindGroup(1, this.bgFloret);
-      pass.setVertexBuffer(0, this.parts.floret.vertex);
-      pass.setIndexBuffer(this.parts.floret.index, this.parts.floret.indexFormat);
-      pass.drawIndexed(this.parts.floret.count, this.floretCount);
+      // Disc florets, for the handful of plants at the finest tier. One draw
+      // per plant, because every species has its own floret count and its own
+      // block of the shared Vogel table.
+      if (lod.floretSlots.length > 0) {
+        pass.setPipeline(P.floret);
+        pass.setBindGroup(1, this.bgScene);
+        pass.setBindGroup(2, this.bgFloretDisc);
+        const mesh = this.parts.floret.lods[0];
+        pass.setVertexBuffer(0, this.parts.floret.vertex);
+        pass.setIndexBuffer(mesh.index, mesh.indexFormat);
+        for (const s of lod.floretSlots) {
+          const n = this.species[s.species].floretCount;
+          pass.drawIndexed(mesh.count, n, 0, 0, s.slot * FLORETS_PER_PLANT);
+          triangles += (mesh.count / 3) * n;
+        }
+      }
+
+      // The far field, back to front.
+      if (lod.impostor.count > 0) {
+        pass.setPipeline(P.impostor);
+        pass.setBindGroup(1, this.bgScene);
+        pass.draw(6, lod.impostor.count, 0, lod.impostor.base);
+        triangles += 2 * lod.impostor.count;
+      }
 
       pass.setPipeline(P.pollen);
       pass.setBindGroup(1, this.bgPollenDraw);
       pass.draw(6, POLLEN_COUNT);
       pass.end();
     }
+    this.triangles = triangles;
 
     // --- depth of field ---------------------------------------------------
     const fullscreen = (label, pipeline, bind, view, blend = false) => {
@@ -861,17 +1051,40 @@ export class Renderer {
     if (slot !== undefined) {
       const buf = this.landingStaging[slot];
       buf.mapAsync(GPUMapMode.READ).then(() => {
-        const f = new Float32Array(buf.getMappedRange());
-        this.headFrame = {
-          pos: [f[0], f[1], f[2]],
-          up: [f[4], f[5], f[6]],
-          velocity: [f[8], f[9], f[10]],
-          side: [f[12], f[13], f[14]],
-        };
+        // Copy out: the mapped range is invalidated by unmap, and the flight
+        // model reads this table for the rest of the frame.
+        this.sites.data.set(new Float32Array(buf.getMappedRange(),
+                                             0, this.plantCount * SITE_FLOATS));
+        this.sites.count = this.plantCount;
         buf.unmap();
         this.landingFree.push(slot);
       }).catch(() => { this.landingFree.push(slot); });
     }
+  }
+
+  /**
+   * The plant the orbit view frames, and the one that is always held at the
+   * finest tier: the biggest head near the middle of the field.
+   */
+  pickHero() {
+    let best = 0, bestScore = -Infinity;
+    this.plants.forEach((p, i) => {
+      const score = p.headRadius * 4 - Math.hypot(p.x, p.z);
+      if (score > bestScore) { bestScore = score; best = i; }
+    });
+    return best;
+  }
+
+  /** Live head position of a plant, or its rest position before any readback. */
+  headPosition(i, out = [0, 0, 0]) {
+    if (i >= 0 && i < this.sites.count) {
+      const f = this.sites.frame(i);
+      out[0] = f.pos[0]; out[1] = f.pos[1]; out[2] = f.pos[2];
+      return out;
+    }
+    const p = this.plants[Math.max(0, Math.min(this.plants.length - 1, i))];
+    out[0] = p.x; out[1] = p.stemHeight; out[2] = p.z;
+    return out;
   }
 
   /**
@@ -929,27 +1142,27 @@ export class Renderer {
     };
   }
 
-  /** Read back the stem chain the compute pass solved. */
-  async probeStem() {
+  /** Read back one plant's stem chain, as the compute pass solved it. */
+  async probeStem(plant = 0) {
     const { device } = this;
-    const bytes = 16 * 16 * 4;
+    const bytes = STEM_NODES * 16 * 4;
     const dst = device.createBuffer({
       size: bytes, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
     const enc = device.createCommandEncoder({ label: 'probeStem' });
-    enc.copyBufferToBuffer(this.stemBuffer, 0, dst, 0, bytes);
+    enc.copyBufferToBuffer(this.stemBuffer, plant * bytes, dst, 0, bytes);
     device.queue.submit([enc.finish()]);
     await dst.mapAsync(GPUMapMode.READ);
     const f = new Float32Array(dst.getMappedRange()).slice();
     dst.unmap(); dst.destroy();
     const nodes = [];
-    for (let i = 0; i < 16; i++) {
+    for (let i = 0; i < STEM_NODES; i++) {
       const o = i * 16;
       nodes.push({
         pos: [f[o], f[o + 1], f[o + 2]].map((v) => +v.toFixed(4)),
         axis: [f[o + 8], f[o + 9], f[o + 10]].map((v) => +v.toFixed(3)),
       });
     }
-    return { finite: f.every(Number.isFinite), first: nodes[0], last: nodes[15] };
+    return { finite: f.every(Number.isFinite), first: nodes[0], last: nodes[STEM_NODES - 1] };
   }
 }

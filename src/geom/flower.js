@@ -1,26 +1,56 @@
-// Procedural composite flower (Asteraceae): a domed disc of florets ringed by
-// strap-shaped ray florets. All dimensions are metres -- the head is ~45mm
-// across, which is the scale a bee actually works at.
+// Procedural composite flowers (Asteraceae): a domed disc of florets ringed by
+// strap-shaped ray florets. All dimensions are metres -- an ox-eye head is
+// ~55mm across, which is the scale a bee actually works at.
+//
+// Every builder here takes a species from species.js. Nothing is hard-coded to
+// one flower any more: the same surfaces, sampled with a different set of
+// numbers, give an ox-eye daisy, a cat's-ear and a cornflower.
+//
+// Two conventions matter for the field:
+//
+//   * Vertices are stored as an OFFSET from the point on the stem the part
+//     attaches to, with the normalised attachment height in the vertex. A
+//     plant's stem height therefore enters only through the solved chain, so
+//     one mesh per species serves every individual whatever height it grew to.
+//   * Every grid is stitched at three levels of detail from the same vertices
+//     (see mesh.js), so switching tier costs an index-buffer swap and moves
+//     nothing on screen.
 
-import { MeshBuilder, sampleSurface, normalize, cross, sub } from './mesh.js';
+import { MeshBuilder, sampleSurface, normalize } from './mesh.js';
 import { makeRng, fbm2 } from './rand.js';
-import { leafMargin, leafHalfWidth, DEFAULT_SHAPE } from './venation.js';
+import { leafHalfWidth, DEFAULT_SHAPE } from './venation.js';
+import { SPECIES, headRadius, rayCount } from './species.js';
 
 export const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5)); // 137.507...deg
 
+/** The reference plant: an ox-eye daisy at its species mean. */
+export const REFERENCE = SPECIES[0];
+
+/**
+ * Dimensions of the reference plant, in the shape the rest of the app has
+ * always expected. The camera's framing, the flight model's fallback aim and
+ * the offline previews all want "how big is a flower, roughly"; they should
+ * not have to know that there are now six answers.
+ */
 export const FLOWER = {
-  discRadius: 0.0115,
-  discDome: 0.0058,
-  floretCount: 420,
-  rayWhorls: [
-    { count: 21, length: 0.0235, width: 0.0062, droop: 0.62, tilt: 0.10 },
-    { count: 13, length: 0.0181, width: 0.0050, droop: 0.40, tilt: 0.34 },
-  ],
-  // A daisy in a lawn: a full-size head on a short stem, standing about twice
-  // the height of the tallest grass rather than towering over it.
-  stemHeight: 0.180,
-  stemBaseRadius: 0.0021,
-  stemTopRadius: 0.0015,
+  discRadius: REFERENCE.head.discRadius,
+  discDome: REFERENCE.head.dome,
+  floretCount: REFERENCE.head.floretCount,
+  rayWhorls: REFERENCE.rays.whorls,
+  stemHeight: REFERENCE.stem.height,
+  stemBaseRadius: REFERENCE.stem.baseRadius,
+  stemTopRadius: REFERENCE.stem.topRadius,
+  headRadius: headRadius(REFERENCE),
+};
+
+// Grid densities of the finest level. Each is 4k+1 in both directions so the
+// stride-2 and stride-4 levels land exactly on the last row and column and the
+// coarse silhouette matches the fine one.
+const GRID = {
+  petal: [21, 9],
+  receptacle: [17, 33],
+  stem: [33, 13],
+  leaf: [41, 17],
 };
 
 // ---------------------------------------------------------------------------
@@ -42,7 +72,9 @@ function petalSurface(cfg) {
 
   // Centreline in the (radial, up) plane, integrated from a pitch angle that
   // accelerates downward -- differential growth on the abaxial side is what
-  // makes ray florets arch over rather than stick out straight.
+  // makes ray florets arch over rather than stick out straight. A negative
+  // droop runs the other way, which is how a cornflower's outer trumpets flare
+  // upward and outward instead of arching over.
   const STEPS = 48;
   const path = [{ r: 0, y: 0 }];
   {
@@ -135,9 +167,10 @@ function petalSurface(cfg) {
 }
 
 /** Build all ray florets of one whorl into `mb`. */
-function addRayWhorl(mb, whorl, whorlIndex, rng, headY) {
+function addRayWhorl(mb, species, whorl, whorlIndex, rng) {
   const { count, length, width, droop, tilt } = whorl;
-  const NU = 26, NV = 9;
+  const R = species.rays;
+  const [NU, NV] = GRID.petal;
 
   for (let i = 0; i < count; i++) {
     // Offset successive whorls by the golden angle so the inner ring sits in
@@ -151,24 +184,24 @@ function addRayWhorl(mb, whorl, whorlIndex, rng, headY) {
       width: width * rng.range(0.88, 1.12),
       droop: droop * rng.range(0.82, 1.18),
       tilt: tilt + rng.sym(0.07),
-      twist: rng.sym(0.30),
-      notchDepth: rng.range(0.05, 0.13),
-      notchCount: rng.next() < 0.5 ? 1.5 : 2.5,
-      cup: rng.range(0.12, 0.26),
-      veinCount: 3 + ((rng.next() * 3) | 0),
+      twist: R.twist * rng.range(-1.2, 1.2),
+      notchDepth: R.notchDepth * rng.range(0.7, 1.35),
+      notchCount: R.notchCount,
+      cup: R.cup * rng.range(0.75, 1.30),
+      veinCount: R.veinCount,
       veinAmp: width * rng.range(0.030, 0.058),
-      waviness: rng.range(0.10, 0.24),
+      waviness: R.waviness * rng.range(0.7, 1.4),
       curlBud: rng.range(1.5, 2.2),
       variant,
     });
 
-    const r0 = FLOWER.discRadius * 0.92;
+    const r0 = species.head.discRadius * 0.92;
     const place = (bloom) => (u, v) => {
       const s = surf(u, v, bloom);
       const r = r0 + s.r;
       return [
         cosP * r - sinP * s.lateral,
-        headY + s.y,
+        s.y,
         sinP * r + cosP * s.lateral,
       ];
     };
@@ -179,8 +212,20 @@ function addRayWhorl(mb, whorl, whorlIndex, rng, headY) {
       axis: (u) => u,
       stemHeight: 1,
       variant,
+      // Whorls past the first are dropped at the coarsest level: at that tier
+      // the head is a few pixels wide before the lens even gets to it, and the
+      // inner ring only ever sat in the gaps of the outer one.
+      dropAt: whorlIndex === 0 ? 3 : 2,
     });
   }
+}
+
+/** Assemble every ray floret of one species' head into one mesh. */
+export function buildRayMesh(species = REFERENCE, seed = 23) {
+  const rng = makeRng(seed);
+  const mb = new MeshBuilder();
+  species.rays.whorls.forEach((w, i) => addRayWhorl(mb, species, w, i, rng));
+  return mb.finish();
 }
 
 // ---------------------------------------------------------------------------
@@ -188,11 +233,13 @@ function addRayWhorl(mb, whorl, whorlIndex, rng, headY) {
 // ---------------------------------------------------------------------------
 
 /**
- * A single disc floret, generated once and instanced across the capitulum.
+ * A single disc floret, generated once and instanced across every capitulum.
  * Built in local space: +Y is the floret's own axis, origin at its base.
  *
  * The open and closed states are both baked into the vertex, so the maturation
  * wave that sweeps the disc is a single per-instance scalar in the shader.
+ * Shared by every species -- what differs between them is how many there are
+ * and how tightly they pack, both of which live in the instance buffer.
  */
 export function buildDiscFloretMesh() {
   const mb = new MeshBuilder();
@@ -227,7 +274,8 @@ export function buildDiscFloretMesh() {
   };
 
   // Around a millimetre across on screen: a denser grid buys nothing, and it
-  // is multiplied by every instance on the disc.
+  // is multiplied by every instance on the disc. Disc florets are only ever
+  // drawn on the handful of plants at the finest tier, so there is one level.
   sampleSurface(mb, corolla(1), 7, 15, {
     bud: corolla(0), uv: (u, v) => [v, u], axis: (u) => u, variant: 0,
   });
@@ -256,8 +304,8 @@ const FI = { posX: 0, posY: 1, posZ: 2, scale: 3, nrmX: 4, nrmY: 5, nrmZ: 6, rad
  * the florets standing on it must read the same curve -- if they drift apart
  * the cushion either floats above its florets or sinks away beneath them.
  */
-export const discDomeY = (rn) =>
-  FLOWER.discDome * Math.pow(Math.max(0, 1 - rn * rn), 0.70);
+export const discDomeY = (rn, species = REFERENCE) =>
+  species.head.dome * Math.pow(Math.max(0, 1 - rn * rn), species.head.domeExp);
 
 /**
  * Vogel's model: r = c*sqrt(n), theta = n * goldenAngle. The golden angle is
@@ -266,23 +314,23 @@ export const discDomeY = (rn) =>
  *
  * @returns {{data: Float32Array, count: number}}
  */
-export function buildFloretInstances(seed = 5) {
+export function buildFloretInstances(species = REFERENCE, seed = 5) {
   const rng = makeRng(seed);
-  const N = FLOWER.floretCount;
-  const Rd = FLOWER.discRadius;
+  const N = species.head.floretCount;
+  const Rd = species.head.discRadius;
   const data = new Float32Array(N * FLORET_INSTANCE_FLOATS);
-  const domeY = discDomeY;
 
   for (let n = 0; n < N; n++) {
     const rn = Math.sqrt((n + 0.5) / N);          // uniform areal density
     const r = Rd * rn;
     const th = n * GOLDEN_ANGLE;
     const x = Math.cos(th) * r, z = Math.sin(th) * r;
-    const y = domeY(rn);
+    const y = discDomeY(rn, species);
 
     // Dome normal from the analytic slope.
     const h = 1e-4;
-    const slope = (domeY(Math.min(1, rn + h)) - domeY(Math.max(0, rn - h))) / (2 * h * Rd);
+    const slope = (discDomeY(Math.min(1, rn + h), species)
+                 - discDomeY(Math.max(0, rn - h), species)) / (2 * h * Rd);
     const nr = -slope;
     const nml = normalize([Math.cos(th) * nr, 1, Math.sin(th) * nr]);
 
@@ -313,18 +361,25 @@ export function buildFloretInstances(seed = 5) {
 // Stem and leaf
 // ---------------------------------------------------------------------------
 
-/** Straight canonical stem; the wind chain bends it in the vertex shader. */
-export function buildStemMesh(seed = 11) {
+/**
+ * Straight canonical stem; the wind chain bends it in the vertex shader.
+ *
+ * Vertices carry only the cross-section offset -- the height is entirely the
+ * chain's business -- so the same tube serves a 78mm daisy and a 330mm
+ * cornflower without rebuilding anything.
+ */
+export function buildStemMesh(species = REFERENCE, seed = 11) {
   const rng = makeRng(seed);
   const mb = new MeshBuilder();
-  const H = FLOWER.stemHeight, NU = 40, NV = 13;
+  const H = species.stem.height;
+  const [NU, NV] = GRID.stem;
   const RIDGES = 7;
 
   const surf = (u, v) => {
     const th = v * Math.PI * 2;
     // Taper, with a slight swell just under the head (the peduncle thickens).
-    const taper = FLOWER.stemBaseRadius +
-      (FLOWER.stemTopRadius - FLOWER.stemBaseRadius) * Math.pow(u, 0.85);
+    const taper = species.stem.baseRadius +
+      (species.stem.topRadius - species.stem.baseRadius) * Math.pow(u, 0.85);
     const swell = 1 + 0.28 * Math.exp(-Math.pow((u - 0.985) / 0.045, 2));
     // Longitudinal ridging -- stems are fluted, not round.
     const flute = 1 + 0.055 * Math.cos(RIDGES * th + u * 1.4);
@@ -340,6 +395,7 @@ export function buildStemMesh(seed = 11) {
     stemHeight: 1,
     variant: rng.next(),
     doubleSided: false,
+    detach: (u) => [0, u * H, 0],
   });
   // stemHeight must vary along the stem for the wind skin; patch it per row.
   const V = 20, verts = mb.verts;
@@ -351,11 +407,16 @@ export function buildStemMesh(seed = 11) {
   return mb.finish();
 }
 
-/** Leaf blade matching the venation outline, so the baked maps register. */
-export function buildLeafMesh(bladeLength, attachHeight, azimuth, seed = 17) {
+/**
+ * Leaf blade matching the venation outline, so the baked maps register.
+ *
+ * `attachFrac` is where on the stem it hangs, as a fraction of stem height;
+ * the blade's own shape is in metres and independent of it.
+ */
+export function buildLeafMesh(bladeLength, attachFrac, azimuth, seed = 17) {
   const rng = makeRng(seed);
   const mb = new MeshBuilder();
-  const NU = 44, NV = 17;
+  const [NU, NV] = GRID.leaf;
   const shape = DEFAULT_SHAPE;
   const cosA = Math.cos(azimuth), sinA = Math.sin(azimuth);
   const variant = rng.next();
@@ -387,8 +448,7 @@ export function buildLeafMesh(bladeLength, attachHeight, azimuth, seed = 17) {
     const along = u * bladeLength;
     // Arch: the petiole lifts away from the stem, then the blade droops under
     // its own weight. A pure downward curve reads as a wilted leaf.
-    let y = attachHeight
-      + rise * bladeLength * Math.sin(Math.PI * Math.min(1, u * 1.15)) * 0.5
+    let y = rise * bladeLength * Math.sin(Math.PI * Math.min(1, u * 1.15)) * 0.5
       - droop * bladeLength * Math.pow(u, 2.1);
     y += cup * half * Math.pow((v - 0.5) * 2, 2);
     y += 0.05 * half * (fbm2(bladeU(u) * 4.0 + variant * 9, v * 2.2, 3) - 0.5);
@@ -399,25 +459,17 @@ export function buildLeafMesh(bladeLength, attachHeight, azimuth, seed = 17) {
     // Register with the baked maps: lx in [-0.5,0.5], v_tex = 1 - bladeU.
     uv: (u, v) => [0.5 + (v - 0.5) * 2 * leafHalfWidth(bladeU(u), shape), 1 - bladeU(u)],
     axis: (u) => u,
-    stemHeight: attachHeight / FLOWER.stemHeight,
+    stemHeight: attachFrac,
     variant,
   });
   return mb.finish();
 }
 
-/** Assemble every ray floret of the head into one mesh. */
-export function buildRayMesh(seed = 23) {
-  const rng = makeRng(seed);
-  const mb = new MeshBuilder();
-  const headY = FLOWER.stemHeight;
-  FLOWER.rayWhorls.forEach((w, i) => addRayWhorl(mb, w, i, rng, headY));
-  return mb.finish();
-}
-
 /** Receptacle: the fleshy cushion the florets sit on, plus involucral bracts. */
-export function buildReceptacleMesh() {
+export function buildReceptacleMesh(species = REFERENCE) {
   const mb = new MeshBuilder();
-  const Rd = FLOWER.discRadius, headY = FLOWER.stemHeight;
+  const Rd = species.head.discRadius;
+  const [NU, NV] = GRID.receptacle;
   const RIM = 1.22;   // how far the bracts flare past the disc, in disc radii
 
   const surf = (u, v) => {
@@ -435,7 +487,7 @@ export function buildReceptacleMesh() {
     // Past the rim it falls away into the reflexed involucral bracts; `beyond`
     // is zero at the rim with zero slope, so the two halves meet smoothly.
     const beyond = Math.max(0, rn - 1) / (RIM - 1);
-    const y = headY + discDomeY(Math.min(1, rn))
+    const y = discDomeY(Math.min(1, rn), species)
       - Rd * 0.42 * Math.pow(beyond, 1.4)
       + Rd * 0.035 * Math.cos(th * 13) * beyond;
     return [Math.cos(th) * r, y, Math.sin(th) * r];
@@ -445,6 +497,28 @@ export function buildReceptacleMesh() {
   // -- receptacle, florets, petal bases -- shares one frame at the stem tip and
   // must move as a single rigid body. Giving each part its own flutter phase is
   // what made the head warp and the disc florets lag behind the cup they sit in.
-  sampleSurface(mb, surf, 20, 33, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
+  sampleSurface(mb, surf, NU, NV, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
   return mb.finish();
+}
+
+/**
+ * Every mesh one species needs, at every level of detail.
+ *
+ * Leaves are skipped for species that carry none above the rosette -- a common
+ * daisy's leaves are flat on the ground under the sward, so drawing them is
+ * paying for geometry that is never visible.
+ */
+export function buildSpeciesMeshes(species) {
+  const leafScale = species.stem.leafScale;
+  const bladeLength = species.stem.height * 0.20 * leafScale;
+  return {
+    stem: buildStemMesh(species),
+    receptacle: buildReceptacleMesh(species),
+    ray: buildRayMesh(species),
+    leafA: leafScale > 0.05 ? buildLeafMesh(bladeLength, 0.58, 0.65, 17) : null,
+    leafB: leafScale > 0.05 ? buildLeafMesh(bladeLength * 0.80, 0.37, -2.05, 29) : null,
+    florets: buildFloretInstances(species),
+    headRadius: headRadius(species),
+    rayCount: rayCount(species),
+  };
 }

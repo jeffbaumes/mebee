@@ -30,18 +30,21 @@ const PIPELINES = {
   'wind.wgsl':        ['bgl0', 'bglWind'],
   'pollen_sim.wgsl':  ['bgl0', 'bglPollenCompute'],
   'pollen_draw.wgsl': ['bgl0', 'bglPollenDraw'],
-  'shadow.wgsl':      ['bgl0', 'bglStemOnly'],
+  'shadow.wgsl':      ['bgl0', 'bglScene'],
   'sky.wgsl':         ['bgl0'],
-  'plant.wgsl':       ['bgl0', 'bglPlant', 'bglMaterial'],
-  'floret.wgsl':      ['bgl0', 'bglFloret'],
+  'ground.wgsl':      ['bgl0'],
+  'grass.wgsl':       ['bgl0'],
+  'plant.wgsl':       ['bgl0', 'bglScene', 'bglPlantTex'],
+  'floret.wgsl':      ['bgl0', 'bglScene', 'bglFloretDisc'],
+  'impostor.wgsl':    ['bgl0', 'bglScene'],
   'dof.wgsl':         ['bgl0', 'bglDof'],
   'bloom.wgsl':       ['bgl0', 'bglBloom'],
   'post.wgsl':        ['bgl0', 'bglPost'],
-  'grass.wgsl':       ['bgl0', 'bglGrass'],
 };
 
 // Parse the layouts straight out of renderer.js so the two cannot drift.
-const js = fs.readFileSync('src/render/renderer.js', 'utf8');
+const rendererSrc = fs.readFileSync('src/render/renderer.js', 'utf8');
+const js = rendererSrc;
 const layouts = {};
 for (const m of js.matchAll(/this\.(bgl\w+)\s*=\s*device\.createBindGroupLayout\(\{([\s\S]*?)\n    \}\);/g)) {
   const entries = {};
@@ -86,10 +89,20 @@ for (const [shader, groups] of Object.entries(PIPELINES)) {
 const STRUCT_EXPECT = {
   'FloretInstance': { file: 'floret.wgsl', jsFloats: 8, note: 'buildFloretInstances' },
   'StemNode':       { file: 'stem.wgsl',   jsFloats: 16, note: 'stem chain init' },
+  'LandingSite':    { file: 'stem.wgsl',   jsFloats: 16, note: 'SITE_FLOATS in sim/sites.js' },
   'Mote':           { file: 'pollen_sim.wgsl', jsFloats: 8, note: 'pollen seeding' },
-  'GrassInstance':  { file: 'grass.wgsl', jsFloats: 8, note: 'buildGrassInstances' },
+  'PlantInstance':  { file: 'instance.wgsl', jsFloats: 40, note: 'packPlantInstances' },
+  'Visible':        { file: 'instance.wgsl', jsFloats: 4, note: 'VISIBLE_WORDS in render/lod.js' },
 };
 const FLOATS = { 'vec4f': 4, 'vec3f': 4, 'vec2f': 2, 'f32': 1, 'u32': 1, 'i32': 1 };
+// Anything the JS side sizes with a named constant is cross-checked against
+// that constant rather than against a number written twice.
+const JS_CONSTANTS = [
+  { file: 'src/render/lod.js', name: 'VISIBLE_WORDS', struct: 'Visible' },
+  { file: 'src/geom/field.js', name: 'PLANT_INSTANCE_FLOATS', struct: 'PlantInstance' },
+  { file: 'src/sim/sites.js',  name: 'SITE_FLOATS', struct: 'LandingSite' },
+  { file: 'src/geom/flower.js', name: 'FLORET_INSTANCE_FLOATS', struct: 'FloretInstance' },
+];
 for (const [name, want] of Object.entries(STRUCT_EXPECT)) {
   const src = resolveIncludes(want.file);
   const m = new RegExp(`struct\\s+${name}\\s*\\{([^}]*)\\}`).exec(src);
@@ -105,6 +118,83 @@ for (const [name, want] of Object.entries(STRUCT_EXPECT)) {
     problems++;
   }
 }
+
+// --- the Globals uniform, field by field -----------------------------------
+// This is the one struct where a wrong offset is completely silent: every
+// field is a vec4f or a mat4x4f, so a mis-numbered slot does not fail
+// validation, it just feeds the shader the wrong numbers -- the sun in the
+// lens's slot, the screen size in the wind's. Offsets are recomputed from the
+// WGSL declaration order using std140-style alignment and compared to the map
+// in renderer.js field by field.
+{
+  const SIZES = { 'mat4x4f': [16, 16], 'vec4f': [4, 4], 'vec3f': [4, 3],
+                  'vec2f': [2, 2], 'f32': [1, 1], 'u32': [1, 1], 'i32': [1, 1] };
+  const src = resolveIncludes('common.wgsl');
+  const m = /struct\s+Globals\s*\{([\s\S]*?)\n\}/.exec(src);
+  const map = /const G = \{([\s\S]*?)\n\};/.exec(rendererSrc);
+  if (!m || !map) { console.log('Globals: could not read both sides'); problems++; }
+  else {
+    const js = {};
+    for (const e of map[1].matchAll(/(\w+):\s*(\d+)/g)) js[e[1]] = Number(e[2]);
+    let offset = 0;
+    const wgsl = {};
+    for (const f of m[1].matchAll(/(\w+)\s*:\s*(\w+)\s*,/g)) {
+      const [align, size] = SIZES[f[2]] || [];
+      if (!align) { console.log(`Globals: unhandled type ${f[2]}`); problems++; continue; }
+      offset = Math.ceil(offset / align) * align;
+      wgsl[f[1]] = offset;
+      offset += size;
+    }
+    for (const [name, off] of Object.entries(wgsl)) {
+      if (js[name] === undefined) {
+        console.log(`Globals: renderer.js has no offset for ${name}`); problems++;
+      } else if (js[name] !== off) {
+        console.log(`Globals.${name}: wgsl at float ${off}, renderer.js says ${js[name]}`);
+        problems++;
+      }
+    }
+    const total = Math.ceil(offset / 4) * 4;
+    if (js.SIZE_FLOATS !== total) {
+      console.log(`Globals: wgsl is ${total} floats, renderer.js SIZE_FLOATS is ${js.SIZE_FLOATS}`);
+      problems++;
+    }
+    for (const name of Object.keys(js)) {
+      if (name !== 'SIZE_FLOATS' && wgsl[name] === undefined) {
+        console.log(`Globals: renderer.js has ${name}, which the WGSL struct does not`);
+        problems++;
+      }
+    }
+  }
+}
+
+// --- named JS sizes vs the WGSL structs they describe ----------------------
+for (const c of JS_CONSTANTS) {
+  const src = fs.readFileSync(c.file, 'utf8');
+  const m = new RegExp(`${c.name}\\s*=\\s*(\\d+)`).exec(src);
+  if (!m) { console.log(`${c.file}: ${c.name} not found`); problems++; continue; }
+  const want = STRUCT_EXPECT[c.struct];
+  if (Number(m[1]) !== want.jsFloats) {
+    console.log(`${c.file}: ${c.name} is ${m[1]} but struct ${c.struct} is ${want.jsFloats} floats`);
+    problems++;
+  }
+}
+
+// --- constants written into both a shader and the renderer -----------------
+// Each of these is a number the two sides have to agree on and that nothing
+// else can catch: the instance stride the floret draw multiplexes on, and the
+// ground disc's tessellation, which the renderer turns into a vertex count.
+const pair = (name, jsRe, wgslFile, wgslRe, transform = (a) => a) => {
+  const a = jsRe.exec(rendererSrc);
+  const b = wgslRe.exec(resolveIncludes(wgslFile));
+  if (!a || !b) { console.log(`${name}: could not read both sides`); problems++; return; }
+  const js = transform(a.slice(1).map(Number));
+  const wg = transform(b.slice(1).map(Number));
+  if (js !== wg) { console.log(`${name}: renderer says ${js}, ${wgslFile} says ${wg}`); problems++; }
+};
+pair('FLORETS_PER_PLANT', /FLORETS_PER_PLANT = (\d+)/, 'floret.wgsl',
+     /FLORETS_PER_PLANT : u32 = (\d+)u/, ([n]) => n);
+pair('ground vertex count', /GROUND_VERTS = (\d+) \* (\d+) \* 6/, 'ground.wgsl',
+     /RINGS\s+: u32 = (\d+)u;\s*\nconst SECTORS : u32 = (\d+)u/, ([r, s2]) => r * s2);
 
 console.log(problems ? `\n${problems} problem(s)` : '\nall shader bindings and struct sizes match');
 process.exit(problems ? 1 : 0);

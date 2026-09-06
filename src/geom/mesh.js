@@ -18,10 +18,20 @@
 export const FLOATS_PER_VERTEX = 20;
 export const VERTEX_STRIDE = FLOATS_PER_VERTEX * 4;
 
+/**
+ * Levels of detail every grid-based mesh is stitched at, coarsening by a
+ * factor of two each time. Three is the useful range: past level 2 a petal is
+ * two triangles and there is nothing left to remove, which is where the
+ * impostor takes over instead.
+ */
+export const LOD_COUNT = 3;
+
 export class MeshBuilder {
   constructor() {
     this.verts = [];
     this.indices = [];
+    /** One record per stitched grid, so every LOD can be re-derived. */
+    this.grids = [];
   }
 
   get vertexCount() { return this.verts.length / FLOATS_PER_VERTEX; }
@@ -44,7 +54,7 @@ export class MeshBuilder {
   quad(a, b, c, d) { this.tri(a, b, c); this.tri(a, c, d); }
 
   /**
-   * Stitch a (nu x nv) vertex grid.
+   * Stitch a (nu x nv) vertex grid, at every level of detail at once.
    *
    * Plant laminae are two-sided -- a petal seen from beneath must not vanish --
    * but that is a rasteriser state, not a geometry property: the pipelines do
@@ -52,27 +62,65 @@ export class MeshBuilder {
    * transmission. Emitting each quad twice therefore doubles the triangle
    * count for no visible difference, so `doubleSided` defaults off and exists
    * only for the rare surface that genuinely needs duplicated winding.
+   *
+   * The coarser levels are index-only: they stitch every 2nd or every 4th row
+   * and column of the SAME vertices. That is what makes LOD nearly free here.
+   * Nothing is re-evaluated, nothing is re-uploaded, and because the coarse
+   * mesh's vertices are a subset of the fine one's, the silhouette does not
+   * shift when a plant changes tier -- it only loses smoothness, which is the
+   * one thing the blur is already destroying.
    */
-  gridIndices(base, nu, nv, doubleSided = false) {
-    for (let i = 0; i < nu - 1; i++) {
-      for (let j = 0; j < nv - 1; j++) {
-        const a = base + i * nv + j, b = a + nv, c = b + 1, d = a + 1;
-        this.quad(a, b, c, d);
-        if (doubleSided) this.quad(a, d, c, b);
+  grid(base, nu, nv, opts = {}) {
+    this.grids.push({ base, nu, nv, doubleSided: opts.doubleSided === true,
+                      dropAt: opts.dropAt ?? LOD_COUNT });
+  }
+
+  /** Emit one grid's triangles at a given row/column stride. */
+  static stitch(out, { base, nu, nv, doubleSided }, stride) {
+    // A stride that does not divide the grid would drop the last row, moving
+    // the silhouette; back off to the largest stride that does.
+    let s = stride;
+    while (s > 1 && ((nu - 1) % s !== 0 || (nv - 1) % s !== 0)) s >>= 1;
+    for (let i = 0; i + s < nu; i += s) {
+      for (let j = 0; j + s < nv; j += s) {
+        const a = base + i * nv + j;
+        const b = base + (i + s) * nv + j;
+        const c = b + s;
+        const d = a + s;
+        out.push(a, b, c, a, c, d);
+        if (doubleSided) out.push(a, d, c, a, c, b);
       }
     }
   }
 
+  /**
+   * Pack the vertices once and the indices once per level of detail.
+   *
+   * `indices`/`indexCount`/`indexFormat` stay on the result as the finest
+   * level, so anything that only ever wanted one mesh (the offline rasteriser,
+   * the previews) is unaffected.
+   */
   finish() {
     const vertexCount = this.vertexCount;
+    const wide = vertexCount > 65535;
+    const Ctor = wide ? Uint32Array : Uint16Array;
+    const lods = [];
+    for (let level = 0; level < LOD_COUNT; level++) {
+      const out = [];
+      for (const g of this.grids) {
+        if (level >= g.dropAt) continue;
+        MeshBuilder.stitch(out, g, 1 << level);
+      }
+      lods.push({ indices: new Ctor(out), indexCount: out.length,
+                  indexFormat: wide ? 'uint32' : 'uint16' });
+    }
     return {
       vertices: new Float32Array(this.verts),
-      indices: vertexCount > 65535
-        ? new Uint32Array(this.indices)
-        : new Uint16Array(this.indices),
-      indexFormat: vertexCount > 65535 ? 'uint32' : 'uint16',
       vertexCount,
-      indexCount: this.indices.length,
+      lods,
+      indices: lods[0].indices,
+      indexCount: lods[0].indexCount,
+      indexFormat: lods[0].indexFormat,
     };
   }
 }
@@ -113,13 +161,26 @@ export function sampleSurface(mb, fn, nu, nv, meta = {}) {
       if (Math.hypot(n[0], n[1], n[2]) < 1e-12) n = [0, 1, 0];
       n = normalize(n);
       const t = normalize(du);
-      const bud = meta.bud ? meta.bud(u, v) : null;
+      let bud = meta.bud ? meta.bud(u, v) : null;
       let bn = n;
       if (bud) {
         const bdu = sub(meta.bud(Math.min(1, u + h), v), meta.bud(Math.max(0, u - h), v));
         const bdv = sub(meta.bud(u, Math.min(1, v + h)), meta.bud(u, Math.max(0, v - h)));
         let c = cross(bdu, bdv);
         bn = Math.hypot(c[0], c[1], c[2]) < 1e-12 ? n : normalize(c);
+      }
+      // Positions are stored as an OFFSET from the point on the stem the part
+      // hangs off, not as an absolute height. Normals and tangents are taken
+      // first, from the absolute surface, so subtracting a per-row offset
+      // cannot flatten a derivative -- a stem tube is a ring at every u, and
+      // differentiating its offset form along u gives nothing to build a
+      // frame out of. Storing the offset is what lets one mesh serve plants of
+      // different heights: the height only ever enters through the frame the
+      // shader looks the attachment up in.
+      if (meta.detach) {
+        const d = meta.detach(u, v);
+        p[0] -= d[0]; p[1] -= d[1]; p[2] -= d[2];
+        if (bud) bud = [bud[0] - d[0], bud[1] - d[1], bud[2] - d[2]];
       }
       mb.push({
         p, n, t, bp: bud, bn,
@@ -130,6 +191,6 @@ export function sampleSurface(mb, fn, nu, nv, meta = {}) {
       });
     }
   }
-  mb.gridIndices(base, nu, nv, meta.doubleSided === true);
+  mb.grid(base, nu, nv, { doubleSided: meta.doubleSided === true, dropAt: meta.dropAt });
   return base;
 }

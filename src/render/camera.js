@@ -14,7 +14,9 @@ export class MacroCamera {
   constructor() {
     this.target = [0, FLOWER.stemHeight, 0];   // the flower head
     this.minDistance = 0.045;
-    this.maxDistance = 2.0;
+    // Far enough back to take in a stretch of the meadow, not just the plant
+    // the orbit is framing.
+    this.maxDistance = 4.0;
     this.distance = 0.30;             // replaced by frameSubject() on first layout
     // Auto-framing steps aside as soon as the viewer zooms themselves.
     this.userAdjusted = false;
@@ -30,7 +32,12 @@ export class MacroCamera {
     // A crawling bee's eye sits about 4mm off the petal, so the near plane has
     // to be closer than that or the surface underfoot clips away.
     this.near = 0.004;
-    this.far = 12.0;
+    // The ground disc runs to sixty metres, and the horizon has to be inside
+    // the frustum or the sky's own ground shows through a hole where the disc
+    // was clipped. Safe here because the depth buffer is float32: with a
+    // 1/distance distribution the near field keeps far more precision than a
+    // unorm24 buffer would give it.
+    this.far = 80.0;
 
     // 'orbit' inspects the flower; 'fly' is the first-person bee.
     this.mode = 'orbit';
@@ -133,7 +140,7 @@ export class MacroCamera {
         this.subject[1] - this.position[1],
         this.subject[2] - this.position[2],
       );
-      this.focusDistance = Math.max(0.04, Math.min(2.0, d));
+      this.focusDistance = Math.max(0.04, Math.min(4.0, d));
     }
     lookAt(this.view, this.position, at, this.flyUp);
     perspective(this.proj, this.fovY, aspect, this.near, this.far);

@@ -1,17 +1,23 @@
 //!include common.wgsl
 
-// Instanced grass. One unit blade, placed, scaled and bent per instance.
+// Grass, placed procedurally around the camera rather than from an instance
+// buffer.
 //
-// The bend comes from the same windAt() the stem solver and the petals use, so
-// a gust that leans the flower leans the grass under it. Nothing here is a
-// separate animation -- it is the same field, sampled at a different point.
-
-struct GrassInstance {
-  posHeight : vec4f,   // xyz base position, w = height in metres
-  orient    : vec4f,   // x = cos(yaw), y = sin(yaw), z = width, w = variant
-}
-
-@group(1) @binding(0) var<storage, read> blades : array<GrassInstance>;
+// The field is now several metres across, and a buffer dense enough to carry
+// turf over all of it would be tens of millions of blades -- almost all of
+// them behind the camera or inside the bokeh. So there is no buffer: the
+// instance index is decoded into a cell of a fixed world grid inside a window
+// that follows the camera, and the blade's position, height and lean are
+// hashed from the cell. Blades therefore stay nailed to the world (they do not
+// swim as the bee moves), the cost is constant wherever it flies, and the
+// field could be a hundred metres across for the same price.
+//
+// Thinning is by the lens, not by distance. A blade is about a millimetre wide;
+// once the circle of confusion at its distance is several times that, it cannot
+// contribute anything an average colour would not, so it is dropped and the
+// ground shader's sward texture carries it. Open the aperture and the sward
+// thins out early; stop down and it reaches further, which is the correct
+// behaviour and falls out of the same rule the flowers use.
 
 struct VOut {
   @builtin(position) clip : vec4f,
@@ -19,7 +25,7 @@ struct VOut {
   @location(1) nrm     : vec3f,
   @location(2) uv      : vec2f,
   @location(3) variant : f32,
-  @location(4) sway    : f32,
+  @location(4) viewZ   : f32,
 }
 
 struct VIn {
@@ -41,28 +47,68 @@ fn rotateAxis(p: vec3f, axis: vec3f, ang: f32) -> vec3f {
 
 @vertex
 fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
-  let inst = blades[ii];
-  let base = inst.posHeight.xyz;
-  let height = max(1e-5, inst.posHeight.w);
-  let cs = inst.orient.x;
-  let sn = inst.orient.y;
-  let width = max(1e-6, inst.orient.z);
-  let variant = inst.orient.w;
+  let cellSize = G.field.x;
+  let heightScale = G.field.y;
+  let across = max(1u, u32(G.field.z));
+  let fade = max(0.05, G.field.w);
+  let cells = across * across;
+
+  // Blade-major, not cell-major: the instance index walks every cell once
+  // before it lays a second blade in any of them. Lowering the draw's instance
+  // count therefore thins the whole sward evenly, instead of shearing the
+  // window in half.
+  let c = ii % cells;
+  let b = ii / cells;
+  // Window of cells centred on whichever cell the camera is standing in.
+  let home = floor(G.cameraPos.xz / cellSize);
+  let cellXZ = home + vec2f(f32(c % across), f32(c / across)) - vec2f(f32(across / 2u));
+
+  let h1 = hash21(cellXZ * 1.37 + vec2f(f32(b) * 7.13, f32(b) * 3.71));
+  let h2 = hash21(cellXZ * 2.71 + vec2f(f32(b) * 1.93 + 11.0, f32(b) * 5.17));
+  let h3 = hash21(cellXZ * 0.83 + vec2f(f32(b) * 9.41 + 31.0, f32(b) * 2.29));
+  let base = vec3f((cellXZ.x + h1) * cellSize, 0.0, (cellXZ.y + h2) * cellSize);
+
+  let toCam = base - G.cameraPos.xyz;
+  let dist = max(1e-3, length(toCam));
+
+  // --- the two reasons a blade is not drawn -----------------------------
+  // Out of the window, and past the point where a blade is finer than the
+  // blur. Both collapse the blade to a point rather than branching, so the
+  // vertex shader stays uniform and the triangles are culled as degenerate.
+  let coc = abs(signedCoC(dist));
+  // A blade is roughly a millimetre wide. This is its width in pixels,
+  // divided by the smallest feature the lens can still separate.
+  let widthPx = 0.0013 * G.screen.y / (2.0 * G.cameraPos.w * dist);
+  let resolvable = widthPx / (1.0 + coc);
+  let keep = clamp(resolvable * 2.2, 0.0, 1.0) * (1.0 - smoothstep(fade * 0.7, fade, dist));
+  let alive = select(0.0, 1.0, h3 < keep);
+
+  // Turf grows where the habitat says it does: rank and tall in the damp
+  // shelter, short and sparse on the hard-grazed ground.
+  let hab = habitatAt(base.xz);
+  let vigour = (0.45 + 0.95 * hab.r) * (1.0 - 0.55 * clamp(hab.b, 0.0, 1.0));
+  let height = 0.055 * heightScale * vigour * (0.45 + 1.5 * h1) * alive;
+  let width = 0.0013 * (0.7 + 0.65 * h2);
+  let yaw = h3 * 6.28318;
+  let cs = cos(yaw);
+  let sn = sin(yaw);
 
   // Non-uniform scale, so the normal takes the inverse scale before it is
   // renormalised -- scaling a blade thin and tall otherwise tips its normals
   // toward the long axis and the whole field lights wrongly.
-  var p = vec3f(v.pos.x * height, v.pos.y * height, v.pos.z * width);
-  var n = normalize(vec3f(v.nrm.x / height, v.nrm.y / height, v.nrm.z / width));
+  let hh = max(1e-5, height);
+  var p = vec3f(v.pos.x * hh, v.pos.y * hh, v.pos.z * width);
+  var n = normalize(vec3f(v.nrm.x / hh, v.nrm.y / hh, v.nrm.z / width));
 
   // Yaw about the vertical.
   p = vec3f(p.x * cs - p.z * sn, p.y, p.x * sn + p.z * cs);
   n = vec3f(n.x * cs - n.z * sn, n.y, n.x * sn + n.z * cs);
 
   let t = G.windParams.y;
-  let wind = windAt(base, t);
+  // The cheap wind: one blade is sampled hundreds of thousands of times a
+  // frame, and the fine octaves of the full field are finer than a blade.
+  let wind = windAtCheap(base, t);
   let speed = length(wind);
-  var sway = 0.0;
 
   if (speed > 1e-5) {
     let flat = vec3f(wind.x, 0.0, wind.z);
@@ -77,11 +123,10 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
     // Subtracting the projection of the base position onto the wind gives the
     // travelling phase, so gusts visibly cross the field instead of every
     // blade beating together.
-    let phase = t * 7.0 - dot(base, wdir) * 9.0 + variant * 6.283;
+    let phase = t * 7.0 - dot(base, wdir) * 9.0 + h1 * 6.283;
     // Clamped: at the top of the wind slider the raw bend reaches about a
     // hundred degrees and lays the sward flat through itself.
     let ang = clamp(speed * 0.55 + sin(phase) * speed * 0.22, -1.1, 1.1) * u * u;
-    sway = ang;
     p = rotateAxis(p, axis, ang);
     n = rotateAxis(n, axis, ang);
   }
@@ -91,9 +136,9 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   o.world = world;
   o.nrm = n;
   o.uv = v.uv;
-  o.variant = variant;
-  o.sway = sway;
+  o.variant = h1;
   o.clip = G.viewProj * vec4f(world, 1.0);
+  o.viewZ = -(G.view * vec4f(world, 1.0)).z;
   return o;
 }
 
@@ -110,9 +155,12 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   let sun = G.sunColor.rgb * G.sunColor.w;
 
   // Per-blade colour variation, and a darker, yellower base where light does
-  // not reach into the sward.
+  // not reach into the sward. The wet end of the habitat runs bluer and the
+  // grazed end runs strawy, so the blades agree with the ground under them.
+  let hab = habitatAt(i.world.xz);
   let tint = fract(i.variant * 7.31);
   var albedo = mix(vec3f(0.055, 0.115, 0.028), vec3f(0.105, 0.165, 0.042), tint);
+  albedo = mix(albedo * vec3f(1.25, 0.95, 0.60), albedo, smoothstep(0.2, 0.7, hab.r));
   albedo = mix(albedo * vec3f(0.72, 0.78, 0.55), albedo, smoothstep(0.0, 0.45, i.uv.y));
   // Tips dry out and pale off.
   albedo = mix(albedo, vec3f(0.20, 0.19, 0.085), smoothstep(0.80, 1.0, i.uv.y) * 0.5);
@@ -140,5 +188,5 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   let occlusion = mix(0.35, 1.0, smoothstep(0.0, 0.55, i.uv.y));
   color += albedo * skyAmbient(N) * occlusion;
 
-  return vec4f(color, 1.0);
+  return vec4f(aerial(color, i.viewZ, -V, L), 1.0);
 }

@@ -17,7 +17,10 @@ struct Globals {
   state       : vec4f,   // bloom, floretFront, exposure, solveStep
   screen      : vec4f,   // w, h, 1/w, 1/h
   shadowParam : vec4f,   // orthoHalfWidth, depthRange, unused, bias
-  plant       : vec4f,   // stemLength, stemSegmentLength, unused, debugView
+  plant       : vec4f,   // plantCount, fieldHalfExtent, lodSharpBias, debugView
+  field       : vec4f,   // grass cell size, height scale, cells across, fade radius
+  hazeSun     : vec4f,   // horizon radiance toward the sun, w = extinction /m
+  hazeAway    : vec4f,   // horizon radiance away from it
   proj        : vec4f,   // near, far, A, B  (ndcZ = A + B/viewDist)
   post        : vec4f,   // bloomStrength, grainAmount, chromatic, vignette
 }
@@ -26,6 +29,12 @@ struct Globals {
 @group(0) @binding(1) var shadowMap  : texture_depth_2d;
 @group(0) @binding(2) var shadowCmp  : sampler_comparison;
 @group(0) @binding(3) var linearSamp : sampler;
+// The habitat, baked once from the same fields geom/field.js sampled to decide
+// where each species establishes. Sharing it rather than re-inventing a noise
+// here is what makes the ground agree with the flowers standing on it: the
+// damp hollow is greener AND has the mayweed in it, the grazed patch is
+// browner AND has the daisies, and neither had to be placed by hand.
+@group(0) @binding(4) var habitatMap : texture_2d<f32>;
 
 const PI       = 3.14159265359;
 const GOLDEN   = 2.39996323;   // golden angle in radians
@@ -200,6 +209,51 @@ fn windAt(p: vec3f, t: f32) -> vec3f {
   ) - vec3f(0.5);
 
   return dir * strength * (0.30 + 1.70 * gust) + n * strength * 0.55;
+}
+
+/**
+ * The same field, at a fraction of the cost, for callers that sample it once
+ * per vertex across tens of thousands of instances.
+ *
+ * Grass is the case that matters: the full windAt() runs four fbm3 sums, which
+ * is fine for sixteen stem nodes and ruinous for three hundred thousand blade
+ * vertices. What a blade actually needs is the travelling gust front -- the
+ * coherence between neighbours is the whole cue -- and one octave of
+ * turbulence to keep them from beating in lockstep. The fine structure is
+ * below a blade's width anyway.
+ */
+fn habitatAt(xz: vec2f) -> vec3f {
+  // r = moisture, g = exposure, b = grazing pressure.
+  let uv = xz / (2.0 * max(1e-3, G.plant.y)) + vec2f(0.5);
+  return textureSampleLevel(habitatMap, linearSamp, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0).rgb;
+}
+
+fn windAtCheap(p: vec3f, t: f32) -> vec3f {
+  let dir = normalize(vec3f(G.windParams.z, 0.0, G.windParams.w) + vec3f(1e-5, 0.0, 0.0));
+  let strength = G.windParams.x;
+  let phase = dot(p, dir) * 1.35 - t * 2.1;
+  let front = pow(0.5 + 0.5 * sin(phase), 3.0);
+  let breadth = valueNoise3(p * 0.7 + vec3f(0.0, 0.0, t * 0.3));
+  let gust = front * (0.45 + 0.9 * breadth);
+  let turb = valueNoise3(p * 7.0 + vec3f(t * 1.7, 0.0, 11.0)) - 0.5;
+  return dir * strength * (0.30 + 1.70 * gust) + vec3f(turb, turb * 0.4, -turb) * strength * 0.45;
+}
+
+/**
+ * Aerial perspective.
+ *
+ * Over the seven metres of the meadow, real extinction is negligible -- this
+ * is a deliberate and modest exaggeration, there to stop the far side of the
+ * field competing with the subject for contrast. The horizon colour is a
+ * PRECOMPUTED pair, one looking into the sun and one away from it, blended by
+ * the forward-scattering lobe. Evaluating the atmosphere itself here would be
+ * a sixty-step raymarch per fragment of every surface in the scene, which is
+ * roughly the cost of the entire rest of the frame.
+ */
+fn aerial(color: vec3f, dist: f32, dir: vec3f, sun: vec3f) -> vec3f {
+  let forward = pow(0.5 + 0.5 * dot(normalize(dir + vec3f(1e-6)), sun), 3.0);
+  let haze = mix(G.hazeAway.rgb, G.hazeSun.rgb, forward);
+  return mix(color, haze, 1.0 - exp(-dist * G.hazeSun.w));
 }
 
 // ---------------------------------------------------------------------------

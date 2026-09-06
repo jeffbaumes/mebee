@@ -1,7 +1,9 @@
-//!include skin.wgsl
+//!include scene.wgsl
 
-// Depth-only pass from the sun. Shares skinning with the main pass so the
-// shadow never lags the geometry it is cast by.
+// Depth-only pass from the sun. Shares the scene bindings and the skinning
+// with the main pass, so the shadow can never lag the geometry it is cast by
+// -- and, because it reads the same visible list, it can never shadow a plant
+// the main pass decided not to draw.
 
 struct VIn {
   @location(0) pos     : vec3f,
@@ -14,10 +16,12 @@ struct VIn {
 }
 
 @vertex
-fn vs(v: VIn) -> @builtin(position) vec4f {
-  let bloom = G.state.x;
+fn vs(v: VIn, @builtin(instance_index) ii: u32) -> @builtin(position) vec4f {
+  let vis = visible[ii];
+  let P = plants[vis.plant];
+  let bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
   let rest = mix(v.budPos, v.pos, bloom);
-  let s = skinToStem(rest, v.nrm, v.tan, v.params.y, v.params.x,
-                     G.plant.x, v.params.z);
+  let s = skinToPlant(P, vis.plant, rest, v.nrm, v.tan,
+                      v.params.y, v.params.x, v.params.z);
   return G.sunViewProj * vec4f(s.pos, 1.0);
 }

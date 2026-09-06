@@ -11,8 +11,17 @@ struct Mote {
 
 @group(1) @binding(0) var<storage, read_write> motes : array<Mote>;
 
-const BOUNDS_LO = vec3f(-0.40, 0.0,  -0.40);
-const BOUNDS_HI = vec3f( 0.40, 0.45,  0.40);
+// Motes are recycled through a box that FOLLOWS the camera rather than through
+// a fixed volume. Over a field several metres across, a fixed box would put
+// every mote somewhere the bee is not; a box that travels keeps the density
+// constant wherever it flies, for the same six thousand particles.
+const MOTE_BOX = vec3f(0.55, 0.34, 0.55);
+
+fn moteBounds() -> array<vec3f, 2> {
+  let c = vec3f(G.cameraPos.x, max(MOTE_BOX.y * 0.55, G.cameraPos.y), G.cameraPos.z);
+  return array<vec3f, 2>(vec3f(c.x - MOTE_BOX.x, max(0.0, c.y - MOTE_BOX.y), c.z - MOTE_BOX.z),
+                         vec3f(c.x + MOTE_BOX.x, c.y + MOTE_BOX.y, c.z + MOTE_BOX.z));
+}
 
 fn windAtSimple(p: vec3f, t: f32) -> vec3f {
   let dir = normalize(vec3f(G.windParams.z, 0.0, G.windParams.w) + vec3f(1e-5, 0.0, 0.0));
@@ -42,9 +51,10 @@ fn update(@builtin(global_invocation_id) gid: vec3u) {
 
   // Recycle through the volume so density stays constant.
   let p = m.pos.xyz;
-  if (any(p < BOUNDS_LO) || any(p > BOUNDS_HI)) {
+  let bounds = moteBounds();
+  if (any(p < bounds[0]) || any(p > bounds[1])) {
     let r = hash33(vec3f(f32(i), G.windParams.y, m.vel.w));
-    m.pos = vec4f(mix(BOUNDS_LO, BOUNDS_HI, r), m.pos.w);
+    m.pos = vec4f(mix(bounds[0], bounds[1], r), m.pos.w);
   }
   motes[i] = m;
 }

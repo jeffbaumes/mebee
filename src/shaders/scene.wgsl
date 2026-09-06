@@ -1,19 +1,32 @@
 //!include common.wgsl
 //!include stem.wgsl
+//!include instance.wgsl
 
-// Read-only view of the solved stem, plus the skinning every plant part uses.
+// Read-only view of the field: every plant's solved stem, every plant's
+// parameters, and this frame's draw list. Every pass that draws a plant binds
+// exactly this group, which is why the shadow pass cannot fall out of step
+// with the main pass -- they are reading the same three buffers.
 
 @group(1) @binding(0) var<storage, read> stemNodes : array<StemNode>;
+@group(1) @binding(1) var<storage, read> plants    : array<PlantInstance>;
+@group(1) @binding(2) var<storage, read> visible   : array<Visible>;
 
 struct Frame { origin: vec3f, x: vec3f, y: vec3f, z: vec3f }
 
-/** Interpolated stem frame at normalised height h (0 = ground, 1 = head). */
-fn stemFrame(h: f32, stemHeight: f32) -> Frame {
+/**
+ * Interpolated stem frame of plant `pid` at normalised height h.
+ *
+ * Chains are packed back to back, STEM_NODES apart, so a plant index is a
+ * stride rather than a separate buffer. That is what lets one dispatch solve
+ * the whole meadow and one draw skin any subset of it.
+ */
+fn stemFrame(pid: u32, h: f32) -> Frame {
   let t = clamp(h, 0.0, 1.0) * f32(STEM_NODES - 1u);
   let i = min(u32(floor(t)), STEM_NODES - 2u);
   let f = t - f32(i);
-  let a = stemNodes[i];
-  let b = stemNodes[i + 1u];
+  let o = pid * STEM_NODES;
+  let a = stemNodes[o + i];
+  let b = stemNodes[o + i + 1u];
 
   var fr: Frame;
   fr.origin = mix(a.pos.xyz, b.pos.xyz, f);
@@ -52,9 +65,10 @@ struct Skinned { pos: vec3f, nrm: vec3f, tan: vec3f }
  *   - displacement along the head's own up axis, so petals flap about their
  *     attachment rather than orbiting.
  * The per-element variant survives only as a small phase nudge, which keeps it
- * from looking mechanical without decoupling anything.
+ * from looking mechanical without decoupling anything. Across the field the
+ * gust front is shared too, so neighbouring plants flex in sequence.
  */
-fn laminaFlex(fr: Frame, local: vec3f, axis: f32, variant: f32) -> vec3f {
+fn laminaFlex(fr: Frame, local: vec3f, axis: f32, variant: f32, scale: f32) -> vec3f {
   if (axis <= 0.0) { return vec3f(0.0); }
   // The simulation clock, not wall time. Nothing here is integrated -- the
   // offset is read straight off `t` -- so the petal goes exactly where the
@@ -83,28 +97,29 @@ fn laminaFlex(fr: Frame, local: vec3f, axis: f32, variant: f32) -> vec3f {
   let bend = (facing * 0.6 + sin(phase) * 0.4) * speed;
   // Measured 8.5mm of tip travel at 0.0075, which is a third of a petal's
   // length; 0.0055 lands near 6mm -- still clearly alive, no longer flailing.
-  return fr.y * bend * axis * axis * 0.0055;
+  return fr.y * bend * axis * axis * 0.0055 * scale;
 }
 
 /**
- * Bend a plant vertex with the stem.
+ * Place a plant vertex in the world.
  *
- * The mesh is authored against a straight canonical stem, so the offset from
- * that rest axis is what gets rotated into the solved frame. `flutter` adds
- * the part's own secondary motion -- a leaf blade twists in a gust well before
- * the stem it hangs off does.
+ * The mesh stores an OFFSET from the point on the stem the part hangs off,
+ * plus that point's normalised height, so this is: look the frame up on the
+ * plant's own solved chain, turn the offset by the plant's yaw, scale it by
+ * the plant's vigour, and rotate it into the frame. Nothing about the plant's
+ * height, lean or position is in the mesh, which is why six meshes serve
+ * several hundred plants.
  */
-fn skinToStem(restPos: vec3f, nrm: vec3f, tan: vec3f,
-              stemH: f32, axis: f32, stemHeight: f32, variant: f32) -> Skinned {
-  let fr = stemFrame(stemH, stemHeight);
-  let restAxis = vec3f(0.0, stemH * stemHeight, 0.0);
-  let local = restPos - restAxis;
+fn skinToPlant(P: PlantInstance, pid: u32, offset: vec3f, nrm: vec3f, tan: vec3f,
+               stemH: f32, axis: f32, variant: f32) -> Skinned {
+  let fr = stemFrame(pid, stemH);
+  let scale = P.base.w;
+  let local = plantYaw(P, offset) * scale;
 
   var out: Skinned;
   out.pos = fr.origin + frameApply(fr, local);
-  out.nrm = normalize(frameApply(fr, nrm));
-  out.tan = normalize(frameApply(fr, tan));
-
-  out.pos += laminaFlex(fr, local, axis, variant);
+  out.nrm = normalize(frameApply(fr, plantYaw(P, nrm)));
+  out.tan = normalize(frameApply(fr, plantYaw(P, tan)));
+  out.pos += laminaFlex(fr, local, axis, variant, scale);
   return out;
 }

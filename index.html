@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<title>mebee - macro flower prototype</title>
+<title>mebee - macro meadow prototype</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Ctext y=%2714%27 font-size=%2714%27%3E%F0%9F%8C%BC%3C/text%3E%3C/svg%3E">
 <style>
   :root { color-scheme: dark; --panel: rgba(14,16,18,0.82); --line: rgba(255,255,255,0.13); }
@@ -32,10 +32,10 @@
   #hud { position: fixed; inset: 0; pointer-events: none; }
   #fps { position: absolute; top: env(safe-area-inset-top, 10px); left: 12px;
     font-variant-numeric: tabular-nums; font-size: 11px; color: #9aa0a6;
-    text-shadow: 0 1px 3px #000; }
+    text-shadow: 0 1px 3px #000; white-space: pre; line-height: 1.35; }
   /* Flight controls. Sized for thumbs and kept clear of the panel. */
   #mode { position: absolute; left: 12px; top: env(safe-area-inset-top, 10px);
-    margin-top: 18px; pointer-events: auto; background: var(--panel);
+    margin-top: 34px; pointer-events: auto; background: var(--panel);
     border: 1px solid var(--line); color: #e8e6e3; border-radius: 999px;
     padding: 0 18px; min-height: 44px; font: inherit; font-size: 12.5px;
     font-weight: 600; cursor: pointer; touch-action: manipulation;
@@ -125,7 +125,7 @@
   <div id="hint" hidden>stick: turn &amp; throttle &middot; hold to climb</div>
 
   <div id="panel">
-    <header id="panel-header">Flower <button id="panel-toggle" title="Show or hide controls">≡</button></header>
+    <header id="panel-header">Meadow <button id="panel-toggle" title="Show or hide controls">≡</button></header>
     <div class="rows">
 
       <div class="group">Light &amp; air</div>
@@ -139,13 +139,15 @@
       </div>
 
       <div class="group">Bloom state</div>
+      <!-- Both shift the whole field on top of each plant's own phase: the
+           meadow already contains buds, fresh heads and ones going over. -->
       <div class="row">
         <label for="bloom">Petal unfurl</label><output id="bloom-val"></output>
         <input type="range" id="bloom" min="0" max="1" step="0.005" value="1">
       </div>
       <div class="row">
-        <label for="floretFront">Floret front</label><output id="floretFront-val"></output>
-        <input type="range" id="floretFront" min="0" max="1" step="0.005" value="0.35">
+        <label for="floretFront">Maturation shift</label><output id="floretFront-val"></output>
+        <input type="range" id="floretFront" min="-0.5" max="0.5" step="0.005" value="0">
       </div>
       <div class="row check">
         <input type="checkbox" id="animate" checked>
@@ -162,6 +164,21 @@
         <input type="range" id="focalLength" min="0.014" max="0.135" step="0.001" value="0.055" data-digits="3">
       </div>
 
+      <div class="group">Field &amp; detail</div>
+      <!-- The lens picks the level of detail: a plant's projected size divided
+           by its circle of confusion is how many features the image can still
+           resolve across it. This biases that number, so 0.3 shows how little
+           geometry the blur actually needs and 3 shows how much is being
+           saved. -->
+      <div class="row">
+        <label for="lodBias">Detail bias</label><output id="lodBias-val"></output>
+        <input type="range" id="lodBias" min="0.15" max="3" step="0.05" value="1">
+      </div>
+      <div class="row">
+        <label for="grassDensity">Grass density</label><output id="grassDensity-val"></output>
+        <input type="range" id="grassDensity" min="0" max="1" step="0.05" value="1">
+      </div>
+
       <div class="group">Diagnostics</div>
       <div class="row">
         <label for="debugView">View</label><output></output>
@@ -173,6 +190,7 @@
           <option value="4">Circle of confusion</option>
           <option value="5">Defocus buffer</option>
           <option value="6">Bloom</option>
+          <option value="7">LOD tier</option>
         </select>
       </div>
       <div class="row">
@@ -206,7 +224,7 @@
   </div>
 </div>
 
-<div id="loading"><div class="spin"></div><p>Growing the flower…</p></div>
+<div id="loading"><div class="spin"></div><p>Growing the meadow…</p></div>
 
 <div id="error" hidden>
   <h2 id="error-msg"></h2>

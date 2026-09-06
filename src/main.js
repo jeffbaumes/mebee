@@ -4,20 +4,13 @@ import { initWebGPU } from './gpu/device.js';
 import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
 import { BeeFlight } from './sim/flight.js';
-import { FLOWER, buildRayMesh } from './geom/flower.js';
-import { FLOATS_PER_VERTEX } from './geom/mesh.js';
+import { FLOWER } from './geom/flower.js';
 
-/** Widest extent of the flower head, measured rather than assumed. */
-function headRadius() {
-  const ray = buildRayMesh();
-  let r = 0;
-  for (let i = 0; i < ray.vertexCount; i++) {
-    const o = i * FLOATS_PER_VERTEX;
-    r = Math.max(r, Math.hypot(ray.vertices[o], ray.vertices[o + 2]));
-  }
-  return r;
-}
-const HEAD_RADIUS = headRadius();
+// The orbit view frames one plant -- the "hero", picked from the field once it
+// has been grown. Until then, the reference species' head is the best guess.
+let heroPlant = -1;
+let heroRadius = FLOWER.headRadius;
+const heroTarget = [0, FLOWER.stemHeight, 0];
 
 // Anything that throws outside boot()'s own try/catch -- a listener, a late
 // rejection -- would otherwise just leave the loading overlay up forever with
@@ -44,8 +37,11 @@ const state = {
   wind: 0.55,
   windDir: 0.9,
   time: 0,
-  bloom: 1.0,              // 0 = bud, 1 = open
-  floretFront: 0.35,       // maturation front; sweeps 1 -> 0 as the disc opens
+  // Both are now nudges applied on top of each plant's OWN phase, which comes
+  // out of species.js: the field already contains buds, half-open heads and
+  // ones going over. The panel shifts the whole meadow rather than setting it.
+  bloom: 1.0,              // multiplier on each plant's unfurl, 0 = all bud
+  floretFront: 0.0,        // shift of the maturation front, -0.5 .. +0.5
   // Direct sun now enters as albedo/pi * E, so a mid-grey (0.18) under a
   // sunIntensity of 20 lands near 1.15 pre-tonemap -- close to clipping.
   // Halving brings it to a mid-tone; this is the knob to reach for first if
@@ -58,11 +54,16 @@ const state = {
   renderScale: 1.0,
   animate: true,
   debugView: 0,
-  mode: 'orbit',           // 'orbit' inspects the flower, 'fly' is the bee
+  lodBias: 1.0,            // >1 spends more geometry than the lens asks for
+  grassDensity: 1.0,
+  pinnedPlant: -1,         // held at the finest tier whatever the metric says
+  mode: 'orbit',           // 'orbit' inspects a flower, 'fly' is the bee
 };
 
 const camera = new MacroCamera();
 const bee = new BeeFlight();
+/** @type {import('./render/renderer.js').Renderer|null} */
+let renderer = null;
 
 let fatalReported = false;
 function reportFatal(message, detail) {
@@ -198,7 +199,7 @@ function bindInput() {
       const now = performance.now();
       if (now - lastTapTime < 320) {
         camera.resetFraming();
-        camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+        camera.frameSubject(heroRadius, canvas.width / canvas.height);
       }
       lastTapTime = now;
     }
@@ -256,7 +257,7 @@ function setMode(mode) {
     camera.mode = 'orbit';
     setFocalLength(ORBIT_FOCAL);
     camera.resetFraming();
-    camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+    camera.frameSubject(heroRadius, canvas.width / canvas.height);
   }
 }
 
@@ -274,6 +275,8 @@ function bindControls() {
     grain: (v) => { state.grain = v; },
     chromatic: (v) => { state.chromatic = v; },
     renderScale: (v) => { state.renderScale = v; resizeCanvas(); },
+    lodBias: (v) => { state.lodBias = v; },
+    grassDensity: (v) => { state.grassDensity = v; },
   };
   for (const [id, apply] of Object.entries(targets)) {
     const el = document.getElementById(id);
@@ -306,7 +309,7 @@ function resizeCanvas() {
   canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
   canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
   // Re-fit on rotation: portrait and landscape need very different distances.
-  camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
+  camera.frameSubject(heroRadius, canvas.width / canvas.height);
 }
 
 // --- boot ------------------------------------------------------------------
@@ -330,9 +333,8 @@ function resizeCanvas() {
     return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
   };
 
-  let renderer;
   try {
-    await stage('Compiling shaders and growing the flower…');
+    await stage('Compiling shaders and growing the meadow…');
     // Uncaptured GPU errors are otherwise silent: the frame just goes black.
     gpu.device.pushErrorScope('validation');
     renderer = await Renderer.create(gpu.device, gpu.context, gpu.format, canvas);
@@ -354,6 +356,14 @@ function resizeCanvas() {
     }
   });
 
+  // Frame the hero plant, now that the field exists and we know which one it is.
+  heroPlant = renderer.pickHero();
+  heroRadius = renderer.plants[heroPlant].headRadius;
+  renderer.headPosition(heroPlant, heroTarget);
+  camera.target = heroTarget;
+  camera.subject = heroTarget;
+  camera.frameSubject(heroRadius, canvas.width / canvas.height);
+
   bindInput();
   bindControls();
   document.getElementById('build').textContent =
@@ -366,14 +376,22 @@ function resizeCanvas() {
   document.getElementById('diagnose').addEventListener('click', async () => {
     diag.textContent = 'reading…';
     try {
-      const [hdr, stem] = await Promise.all([renderer.probeHDR(), renderer.probeStem()]);
+      const [hdr, stem] = await Promise.all([
+        renderer.probeHDR(), renderer.probeStem(Math.max(0, heroPlant))]);
+      const st = renderer.lod.stats;
+      const counts = Object.entries(renderer.field.stats.counts)
+        .map(([k, n]) => `${k} ${n}`).join('  ');
       const text =
         `hdr  min ${hdr.min.toExponential(2)}  max ${hdr.max.toExponential(2)}\n` +
         `     mean ${hdr.mean.toExponential(2)}  nan ${(hdr.nanFraction * 100).toFixed(1)}%\n` +
-        `stem finite=${stem.finite}\n` +
+        `stem finite=${stem.finite}  (hero ${heroPlant})\n` +
         `     n0 ${JSON.stringify(stem.first.pos)}\n` +
         `     n15 ${JSON.stringify(stem.last.pos)}\n` +
         `     axis15 ${JSON.stringify(stem.last.axis)}\n` +
+        `lod  tiers ${st.tiers.join('/')}  drawn ${st.visible}  culled ${st.culled}\n` +
+        `     ${(renderer.triangles / 1000).toFixed(1)}k tris  sites ${renderer.sites.count}\n` +
+        `field ${renderer.plantCount} plants over ` +
+        `${renderer.field.stats.area.toFixed(1)}m2\n     ${counts}\n` +
         `cam  ${camera.position.map((v) => v.toFixed(3)).join(', ')}  d=${camera.distance.toFixed(3)}`;
       diag.textContent = text;
       console.log(text);
@@ -396,27 +414,28 @@ function resizeCanvas() {
     state.time += dt;
 
     if (state.animate) {
-      // The maturation front creeps inward, so the disc opens outside-in the
-      // way a real capitulum does over a few days.
-      state.floretFront = 0.5 + 0.5 * Math.cos(state.time * 0.06);
-      document.getElementById('floretFront').value = state.floretFront;
+      // The maturation front creeps inward, so every disc opens outside-in the
+      // way a real capitulum does over a few days. This is a shift applied to
+      // the whole field on top of each plant's own phase, so the meadow moves
+      // through the season together without the plants falling into step.
+      state.floretFront = 0.35 * Math.cos(state.time * 0.06);
+      const el = document.getElementById('floretFront');
+      if (el) el.value = state.floretFront;
     }
 
+    renderer.lodBias = state.lodBias;
+    renderer.grassDensity = state.grassDensity;
+
     if (state.mode === 'fly') {
-      // The head's frame arrives from the GPU a couple of frames late, which
-      // is far below what is visible at the speed the flower sways.
-      const head = renderer.headFrame;
-      bee.update(dt, head);
-      const fwd = bee.viewForward(head);
-      camera.setFly(bee.position, fwd, bee.upVector(head));
-      // Focus a short way ahead while crawling. Focusing on the flower's centre
-      // -- millimetres away, and clamped up to the minimum focus distance --
-      // would leave everything the bee is standing on out of focus.
-      camera.subject = bee.mode === 'crawl'
-        ? [bee.position[0] + fwd[0] * 0.035,
-           bee.position[1] + fwd[1] * 0.035,
-           bee.position[2] + fwd[2] * 0.035]
-        : [0, FLOWER.stemHeight, 0];
+      // The site table arrives from the GPU a couple of frames late, which is
+      // far below what is visible at the speed the flowers sway.
+      const sites = renderer.sites;
+      bee.update(dt, sites);
+      camera.setFly(bee.position, bee.viewForward(sites), bee.upVector(sites));
+      camera.subject = bee.focusTarget(sites);
+      // Whatever the bee is standing on stays at the finest tier however the
+      // metric scores it -- it is four millimetres from the lens.
+      state.pinnedPlant = bee.plant;
       if (bee.mode !== lastBeeMode) {
         lastBeeMode = bee.mode;
         const crawling = bee.mode === 'crawl';
@@ -427,13 +446,22 @@ function resizeCanvas() {
           ? 'stick: walk the flower \u00b7 take off to leave'
           : 'stick: turn \u0026 throttle \u00b7 hold to climb';
       }
+    } else {
+      // Orbit: follow the hero plant's head as it sways, so the subject does
+      // not drift out of frame on a gusty day.
+      renderer.headPosition(heroPlant, heroTarget);
+      state.pinnedPlant = heroPlant;
     }
     camera.update(canvas.width / canvas.height);
     renderer.render(camera, state, dt);
 
     frames++;
     if (now - fpsClock > 500) {
-      fpsEl.textContent = `${Math.round(frames * 1000 / (now - fpsClock))} fps  ${canvas.width}x${canvas.height}`;
+      const t = renderer.lod.stats.tiers;
+      fpsEl.textContent =
+        `${Math.round(frames * 1000 / (now - fpsClock))} fps  ${canvas.width}x${canvas.height}\n` +
+        `lod ${t[0]}/${t[1]}/${t[2]} + ${t[3]} blobs of ${renderer.plantCount}  ` +
+        `${(renderer.triangles / 1000).toFixed(0)}k tris`;
       frames = 0; fpsClock = now;
     }
     requestAnimationFrame(frame);

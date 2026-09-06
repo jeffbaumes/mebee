@@ -1,26 +1,41 @@
 //!include common.wgsl
 //!include stem.wgsl
+//!include instance.wgsl
 
-// Wind field + stem solver + landing-site publication, all on the GPU.
+// Wind field + stem solver + landing-site publication for the whole field.
 //
-// The whole point of solving the plant here is that the CPU never needs the
+// One workgroup per plant, one thread per node. Chains are packed back to back
+// in a single buffer, so several hundred plants are one dispatch and one
+// buffer, and a plant index is just a stride -- there is no per-plant state
+// anywhere on the CPU and nothing to keep in sync.
+//
+// The whole point of solving the plants here is that the CPU never needs the
 // geometry back. The only thing that crosses back is the LandingSite buffer,
-// which is tiny and is what the flight code queries instead of colliding
-// against triangles.
+// one entry per plant, which is what the flight code queries instead of
+// colliding against triangles.
 
 @group(1) @binding(0) var<storage, read_write> stemNodes : array<StemNode>;
 @group(1) @binding(1) var<storage, read_write> landing   : array<LandingSite>;
+@group(1) @binding(2) var<storage, read> plants : array<PlantInstance>;
 
 var<workgroup> wsPos : array<vec3f, STEM_NODES>;
 
 @compute @workgroup_size(16)
-fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
+fn solveStem(@builtin(local_invocation_id) lid: vec3u,
+             @builtin(workgroup_id) wid: vec3u) {
   // No early return: the workgroup size equals STEM_NODES exactly, and a
   // conditional return here would put every workgroupBarrier below into
   // non-uniform control flow.
   let i = lid.x;
+  let pid = wid.x;
+  let P = plants[pid];
+  let root = P.base.xyz;
+  // The plant's rest direction. Most stems lean a little, and a meadow of
+  // perfectly vertical stems is one of the things that reads as a render.
+  let restAxis = normalize(P.axis.xyz + vec3f(0.0, 1e-4, 0.0));
+  let stemHeight = max(1e-4, P.axis.w);
+  let segLen = stemHeight / f32(STEM_NODES - 1u);
   let restH = f32(i) / f32(STEM_NODES - 1u);
-  let segLen = G.plant.y;
 
   // EXACTLY one step per frame, of the length the host hands us in state.w.
   //
@@ -44,7 +59,8 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   // different clock from the plant it is blowing through.
   let h = G.state.w;
 
-  var node = stemNodes[i];
+  let gi = pid * STEM_NODES + i;
+  var node = stemNodes[gi];
   var pos = node.pos.xyz;
   var prev = node.prev.xyz;
 
@@ -53,7 +69,14 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     let drag = windAt(pos, G.windParams.y);
     // Thin stems catch wind roughly with the square of height: more lever
     // arm and more exposed area away from the ground.
-    let expose = restH * restH;
+    //
+    // The per-plant gain is a cantilever ratio: see stemWindGain() in
+    // species.js for where it comes from and why its exponent is 2 rather
+    // than beam theory's 4. It has to be here rather than emergent, because
+    // the solver's own deflection turns out to be almost independent of chain
+    // length -- measured, not assumed: tools/sim-stem.mjs sweeps every stem
+    // height and gain in the field and reports the sway of each.
+    let expose = restH * restH * P.florets.w;
     let accel = drag * 12.0 * expose + vec3f(0.0, -9.81, 0.0) * 0.045;
     let vel = (pos - prev) * 0.96;
     let next = pos + vel + accel * h * h;
@@ -69,8 +92,8 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     // its position. Without it the chain is a rope hanging from a point:
     // gravity rotates the whole thing about the root and the stem folds flat
     // to the ground, which is exactly what it did.
-    if (i == 0u) { wsPos[0] = vec3f(0.0, 0.0, 0.0); }
-    if (i == 1u) { wsPos[1] = vec3f(0.0, segLen, 0.0); }
+    if (i == 0u) { wsPos[0] = root; }
+    if (i == 1u) { wsPos[1] = root + restAxis * segLen; }
     workgroupBarrier();
 
     // Distance constraints, red/black split so neighbours never fight over
@@ -94,7 +117,7 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
       let b = wsPos[i - 1u];
       let d = b - a;
       let cont = d / max(1e-6, length(d));
-      let mixed = mix(cont, vec3f(0.0, 1.0, 0.0), 0.10);
+      let mixed = mix(cont, restAxis, 0.10);
       let straight = b + normalize(mixed) * segLen;
       wsPos[i] = mix(wsPos[i], straight, 0.28);
     }
@@ -106,7 +129,7 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
 
   node.pos = vec4f(pos, restH);
   node.prev = vec4f(prev, 0.0);
-  stemNodes[i] = node;
+  stemNodes[gi] = node;
   // storageBarrier, not workgroupBarrier: the latter orders workgroup memory
   // only, so thread 0's frame writes below could be clobbered by another
   // thread's whole-struct write above, leaving the axis stale or garbage --
@@ -132,22 +155,26 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
       if (length(side) < 1e-4) { side = vec3f(0.0, 0.0, 1.0) - axis * dot(vec3f(0.0, 0.0, 1.0), axis); }
       side = normalize(side);
       refDir = side;
-      stemNodes[k].axis = vec4f(axis, 0.0);
-      stemNodes[k].side = vec4f(side, 0.0);
+      stemNodes[pid * STEM_NODES + k].axis = vec4f(axis, 0.0);
+      stemNodes[pid * STEM_NODES + k].side = vec4f(side, 0.0);
     }
 
-    // Publish the landing pad on the flower head.
-    let top = stemNodes[STEM_NODES - 1u];
+    // Publish this plant's landing pad. One per plant, in plant order, so the
+    // flight code's "nearest flower" is a scan of a small flat array rather
+    // than a query against any scene structure.
+    let top = stemNodes[pid * STEM_NODES + STEM_NODES - 1u];
     var site: LandingSite;
-    site.pos = vec4f(top.pos.xyz, 0.011);
-    site.normal = vec4f(top.axis.xyz, 1.0 - G.state.y);
+    // Radius the bee can settle within: the disc, not the whole head, because
+    // that is the part it can stand on.
+    site.pos = vec4f(top.pos.xyz, P.orient.w * P.base.w);
+    site.normal = vec4f(top.axis.xyz, 1.0 - P.phase.y);
     // Pad velocity, for a lander to match: derived from the same step the
     // solve actually used, not the frame time.
     site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / max(1e-6, h), 0.0);
     // The side vector completes the frame: with it the host can reconstruct
     // the head's full orientation and put a crawl surface on it that sways
     // with the flower, without duplicating the solve on the CPU.
-    site.side = vec4f(top.side.xyz, 0.0);
-    landing[0] = site;
+    site.side = vec4f(top.side.xyz, P.orient.z * P.base.w);
+    landing[pid] = site;
   }
 }

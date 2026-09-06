@@ -5,6 +5,9 @@
 // reports what the plant actually does rather than what some older tuning did.
 
 import { FLOWER } from '../src/geom/flower.js';
+import { SPECIES, stemWindGain } from '../src/geom/species.js';
+import { growField } from '../src/geom/field.js';
+import { BOUNDS } from '../src/sim/flight.js';
 
 const STEM_NODES = 16;
 export const FIXED_DT = 1 / 60;   // must match wind.wgsl
@@ -98,8 +101,18 @@ export function simulate(opts = {}) {
     force = 12.0, damping = 0.96, bend = 0.28, iterations = 8,
     gravity = 0.045, stemHeight = FLOWER.stemHeight, restBias = 0.10,
     jitterFps = false, policy = 'catchup1', hitches = false,
+    // The plant's own rest direction. Most stems in the field lean a little,
+    // and the solver pins node 1 along this and bends back toward it, so a
+    // leaning stem is a different mechanical problem from an upright one.
+    lean = 0, leanDir = 0,
+    // Per-plant cantilever gain on the wind force; see stemWindGain() in
+    // species.js. 1 is the reference ox-eye, which is what every other row in
+    // this tool's output is measured against.
+    windGain = 1,
   } = opts;
 
+  const restAxis = [Math.cos(leanDir) * Math.sin(lean), Math.cos(lean),
+                    Math.sin(leanDir) * Math.sin(lean)];
   const segLen = stemHeight / (STEM_NODES - 1);
   const dir = [Math.cos(windDir), 0, Math.sin(windDir)];
   const windAt = (p, t) => {
@@ -118,8 +131,9 @@ export function simulate(opts = {}) {
 
   const pos = [], prev = [];
   for (let i = 0; i < STEM_NODES; i++) {
-    pos.push([0, i * segLen, 0]);
-    prev.push([0, i * segLen, 0]);
+    const p = restAxis.map((a) => a * i * segLen);
+    pos.push(p.slice());
+    prev.push(p.slice());
   }
 
   const tipPath = [];
@@ -171,7 +185,7 @@ export function simulate(opts = {}) {
       for (let i = 1; i < STEM_NODES; i++) {
         const restH = i / (STEM_NODES - 1);
         const drag = windAt(pos[i], t);
-        const expose = restH * restH;
+        const expose = restH * restH * windGain;
         const accel = [
           drag[0] * force * expose,
           drag[1] * force * expose - 9.81 * gravity,
@@ -187,7 +201,7 @@ export function simulate(opts = {}) {
         // Pinning node 1 as well as node 0 anchors the base DIRECTION, not
         // just its position, which is what makes this a stem and not a rope.
         pos[0] = [0, 0, 0];
-        pos[1] = [0, segLen, 0];
+        pos[1] = restAxis.map((a) => a * segLen);
         // Red/black, as in the shader: neighbours never fight over one node
         // inside a pass, so both see the same values a parallel solve does.
         for (let parity = 0; parity < 2; parity++) {
@@ -206,7 +220,7 @@ export function simulate(opts = {}) {
           // The bend target blends the parent's continuation with the rest
           // pose, so the stem remembers being upright, not merely straight.
           const cont = dv.map((v) => v / l);
-          const mixed = cont.map((v, k) => v * (1 - restBias) + [0, 1, 0][k] * restBias);
+          const mixed = cont.map((v, k) => v * (1 - restBias) + restAxis[k] * restBias);
           const ml = Math.max(1e-6, Math.hypot(...mixed));
           const target = b.map((v, k) => v + (mixed[k] / ml) * segLen);
           pos[i] = pos[i].map((v, k) => v + (target[k] - v) * bend);
@@ -260,7 +274,57 @@ export function simulate(opts = {}) {
 }
 
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split('/').pop())) {
-  const show = (label, o) => console.log(`  ${label.padEnd(12)}`, JSON.stringify(simulate(o)));
+  const show = (label, o) => console.log(`  ${label.padEnd(14)}`, JSON.stringify(simulate(o)));
+
+  // The field spans a 78mm common daisy to a 330mm cornflower, so the segment
+  // length varies more than fourfold and the same integrator has to stay
+  // stable across all of it. Nothing in the shader is scaled per species on
+  // purpose -- see the comment on `expose` in wind.wgsl -- so this is where
+  // that decision is checked rather than assumed.
+  // The field, not a guess at it. Every plant carries its own height and its
+  // own cantilever gain (species.js), and the two are correlated through
+  // vigour -- a big plant is both taller and thicker -- so the extremes have
+  // to be taken from the actual generator rather than from the corners of the
+  // parameter box, which contains combinations nothing ever grows into.
+  console.log('every stem the field actually grows, at the shipped policy:');
+  const field = growField({ min: BOUNDS.min, max: BOUNDS.max }, { target: 700 });
+  let unstable = 0;
+  for (const [i, sp] of SPECIES.entries()) {
+    const mine = field.plants.filter((p) => p.species === i).map((p) => ({
+      h: p.stemHeight,
+      gain: stemWindGain(p.stemHeight, sp.stem.baseRadius * p.scale),
+      lean: p.lean,
+    })).sort((a, b) => a.gain - b.gain);
+    if (mine.length === 0) continue;
+    const pick = [mine[0], mine[mine.length >> 1], mine[mine.length - 1]];
+    const rows = pick.map(({ h, gain, lean }, k) => {
+      const o = simulate({ stemHeight: h, windGain: gain, lean, leanDir: 1.1, policy: 'snapped' });
+      // Instability is a LURCH, not a large sway: a stem in a gust genuinely
+      // moves. maxJerk is the frame-to-frame change in step size, which is
+      // what you actually see go wrong.
+      if (o.blewUp || o.maxJerkMm > 0.5) unstable++;
+      return `${['min', 'med', 'max'][k]} ${gain.toFixed(2)}x ` +
+             `${String(o.swayMm).padStart(5)}mm/${String(o.maxJerkMm).padStart(4)}jerk`;
+    });
+    console.log(`  ${sp.key.padEnd(11)} n=${String(mine.length).padStart(3)}   ${rows.join('   ')}`);
+  }
+  // And at the top of the wind slider, which is nearly four times the default.
+  const gusty = SPECIES.map((sp, i) => {
+    const mine = field.plants.filter((p) => p.species === i);
+    if (!mine.length) return null;
+    const worst = mine.reduce((a, b) =>
+      stemWindGain(a.stemHeight, sp.stem.baseRadius * a.scale) >
+      stemWindGain(b.stemHeight, sp.stem.baseRadius * b.scale) ? a : b);
+    const o = simulate({ stemHeight: worst.stemHeight, lean: worst.lean, leanDir: 1.1,
+                         windGain: stemWindGain(worst.stemHeight, sp.stem.baseRadius * worst.scale),
+                         strength: 2.0, policy: 'snapped' });
+    if (o.blewUp || o.maxJerkMm > 1.2) unstable++;
+    return `${sp.key} ${o.swayMm}mm`;
+  }).filter(Boolean);
+  console.log(`  at the top of the wind slider: ${gusty.join('  ')}`);
+  console.log(unstable ? `  ${unstable} case(s) lurch at the shipped constants`
+                       : '  every stem in the field is stable on one set of constants');
+
   const policies = ['rounded', 'catchup1', 'one', 'snapped'];
   for (const [name, o] of [
     ['steady 60fps', {}],

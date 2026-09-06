@@ -5,18 +5,28 @@
 // the model, so the player is never asked to hold a heading or manage speed.
 
 import { FLOWER } from '../geom/flower.js';
+import { HeadSites, crawlAxes } from './sites.js';
 
-/** Play volume. The bee cannot leave it; `margin` is the soft cushion inside. */
+/**
+ * Play volume: a meadow, not a flowerpot.
+ *
+ * `margin` is the soft cushion inside the wall. The ceiling clears the tallest
+ * species (a cornflower runs to 330mm) with room to look down on it.
+ */
 export const BOUNDS = {
-  min: [-0.40, 0.020, -0.40],
-  max: [0.40, 0.400, 0.40],
-  margin: 0.07,
+  min: [-3.5, 0.020, -3.5],
+  max: [3.5, 0.900, 3.5],
+  margin: 0.35,
 };
 
-const CRUISE_FWD = 0.075;   // m/s at full forward stick
-const CRUISE_BACK = 0.040;  // m/s at full back stick; backing off is slower
-const CLIMB = 0.160;        // m/s added while boosting
-const SINK = 0.045;         // m/s of gentle settle with no boost
+// Speeds are set by how long it should take to cross the field, not by
+// anything about a real bee -- at 5 m/s the seven-metre field would be gone in
+// a second and a half. These cross it in about half a minute at full stick,
+// which leaves time to pick a flower out and go to it.
+const CRUISE_FWD = 0.26;    // m/s at full forward stick
+const CRUISE_BACK = 0.13;   // m/s at full back stick; backing off is slower
+const CLIMB = 0.34;         // m/s added while boosting
+const SINK = 0.11;          // m/s of gentle settle with no boost
 const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
 const HORIZ_LAG = 3.6;      // 1/s
 const TURN_RATE = 1.2;      // rad/s at full stick; a full circle in ~5s
@@ -34,13 +44,13 @@ const VIEW_TILT_LAG = 3.0;  // 1/s
 const AIM_PITCH_LIMIT = 1.05;  // rad. Short of vertical on purpose: the flying
                                // camera's up is world up, and a look straight
                                // down the up-vector has no defined roll.
-const WALL_PUSH = 2.6;      // m/s^2 at the very edge of the cushion
+const WALL_PUSH = 5.0;      // m/s^2 at the very edge of the cushion
 
 // --- crawl -----------------------------------------------------------------
-// The landable surface is an oblate ellipsoid standing in for the flower head.
-// Approximating rather than colliding against the real petals means the walk
-// never catches on a notch and never falls between two florets.
-export const CRAWL_AXES = [0.040, 0.013, 0.040];
+// The shape of the landable surface, and how far out it captures, both live in
+// sim/sites.js now: they are properties of a head, and heads come in six sizes.
+// Reference values, for the offline checks and for framing.
+export const CRAWL_AXES = crawlAxes(FLOWER.headRadius);
 // Only the TOP of that ellipsoid is walkable -- a dome, not a whole shell.
 // Carrying on around the rim took the bee through a band where the surface
 // stands vertical and then onto the underside, which reads as the bee being
@@ -51,11 +61,6 @@ export const CRAWL_AXES = [0.040, 0.013, 0.040];
 const CRAWL_MIN_ELEVATION = 0.30;                       // rad above the rim
 const CRAWL_MIN_Y = Math.sin(CRAWL_MIN_ELEVATION);
 const CRAWL_RIM_XZ = Math.cos(CRAWL_MIN_ELEVATION);
-// Capture shell, as a uniform margin in metres around the ellipsoid rather
-// than a scale factor. A normalised threshold looks even but is not: at 1.3 it
-// reaches 12mm out at the rim and only 4mm above the disc, because the head is
-// thin. A constant margin gives the same forgiving approach from every angle.
-const LAND_MARGIN = 0.013;
 const EYE_HEIGHT = 0.004;
 const CRAWL_FWD = 0.020;       // m/s
 const CRAWL_BACK = 0.012;
@@ -129,7 +134,11 @@ const approach = (current, target, rate, dt) =>
   current + (target - current) * (1 - Math.exp(-rate * dt));
 
 export class BeeFlight {
-  constructor() {
+  /** @param {number[]} start  where the bee begins, in world metres */
+  constructor(start = [0.14, 0.30, 0.20]) {
+    this.start = start;
+    // Reused by every per-frame site query, so flying allocates nothing.
+    this.scratch = HeadSites.scratch();
     this.reset();
   }
 
@@ -142,8 +151,10 @@ export class BeeFlight {
     this.surfaceDir = [0, 1, 0];
     this.surfaceHeading = 0;
     this.landCooldown = 0;
-    this.position = [0.115, 0.205, 0.130];
-    // Face the flower head at the origin.
+    /** Which head the bee is standing on, or -1 in the air. */
+    this.plant = -1;
+    this.position = [this.start[0], this.start[1], this.start[2]];
+    // Face the middle of the field.
     this.yaw = Math.atan2(-this.position[0], -this.position[2]);
     this.pitch = 0;                 // derived from climb rate, not steered
     this.velocity = [0, 0, 0];
@@ -165,7 +176,7 @@ export class BeeFlight {
   surfaceState(frame) {
     const b = headBasis(frame);
     const n = this.surfaceDir;
-    const A = CRAWL_AXES;
+    const A = crawlAxes(frame.headRadius);
     const local = [n[0] * A[0], n[1] * A[1], n[2] * A[2]];
     // Ellipsoid normal is the gradient of x^2/a^2 + ... , not the radius.
     const nrmLocal = norm3([n[0] / A[0], n[1] / A[1], n[2] / A[2]]);
@@ -188,7 +199,8 @@ export class BeeFlight {
   /** Settle onto the surface at whatever point the approach reached. */
   land(frame) {
     const b = headBasis(frame);
-    const A = CRAWL_AXES;
+    const A = crawlAxes(frame.headRadius);
+    this.plant = frame.index;
     const l = toLocal(b, this.position);
     // An approach from the side or from underneath lands below the rim; seat
     // it on the dome rather than outside the surface the walk can reach.
@@ -216,6 +228,7 @@ export class BeeFlight {
     this.yaw = Math.atan2(st.forward[0], st.forward[2]);
     this.pitch = 0;
     this.mode = 'fly';
+    this.plant = -1;
     this.landCooldown = LAND_COOLDOWN;
   }
 
@@ -229,7 +242,7 @@ export class BeeFlight {
     const speed = throttle >= 0 ? throttle * CRAWL_FWD : throttle * CRAWL_BACK;
 
     if (Math.abs(speed) > 1e-6) {
-      const A = CRAWL_AXES;
+      const A = crawlAxes(frame.headRadius);
       const n = this.surfaceDir;
       const { e1, e2 } = tangentBasis(n);
       const h = this.surfaceHeading;
@@ -272,12 +285,26 @@ export class BeeFlight {
     return this;
   }
 
-  update(dt, frame = null) {
+  /**
+   * The frame of the head the bee is standing on, or null.
+   *
+   * Held by INDEX rather than by value, so the flower carries the bee: the
+   * table is rewritten every frame from the solver, and looking it up again
+   * each tick is what makes a swaying head take its passenger with it.
+   */
+  currentFrame(sites) {
+    if (!sites || this.plant < 0 || this.plant >= sites.count) return null;
+    return sites.frame(this.plant, this.scratch);
+  }
+
+  /** @param {import('./sites.js').HeadSites|null} sites */
+  update(dt, sites = null) {
     const step = Math.min(0.05, Math.max(1 / 240, dt));
     this.landCooldown = Math.max(0, this.landCooldown - step);
 
     if (this.mode === 'crawl') {
-      if (!frame) return this;                  // no frame yet: hold position
+      const frame = this.currentFrame(sites);
+      if (!frame) return this;                  // no table yet: hold position
       if (this.boost > 0) { this.takeOff(frame); return this; }
       return this.updateCrawl(step, frame);
     }
@@ -315,20 +342,16 @@ export class BeeFlight {
     const climbTilt = Math.max(-VIEW_TILT_LIMIT,
       Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
     const target = Math.max(-AIM_PITCH_LIMIT,
-      Math.min(AIM_PITCH_LIMIT, this.aimPitch(frame) + climbTilt));
+      Math.min(AIM_PITCH_LIMIT, this.aimPitch(sites) + climbTilt));
     this.pitch = approach(this.pitch, target, VIEW_TILT_LAG, step);
 
-    // Touchdown. Tested in ellipsoid-normalised space, where the surface is
-    // exactly the unit sphere whatever the head's orientation.
-    if (frame && this.landCooldown <= 0) {
-      const b = headBasis(frame);
-      const l = toLocal(b, this.position);
-      const r = Math.hypot(
-        l[0] / (CRAWL_AXES[0] + LAND_MARGIN),
-        l[1] / (CRAWL_AXES[1] + LAND_MARGIN),
-        l[2] / (CRAWL_AXES[2] + LAND_MARGIN),
-      );
-      if (r < 1.0) this.land(frame);
+    // Touchdown, on whichever head's capture shell the bee is inside. The test
+    // lives in sites.js because it is a property of a head, and the heads are
+    // now six sizes: it is done in ellipsoid-normalised space, where every
+    // one of them is exactly the unit sphere.
+    if (sites && this.landCooldown <= 0) {
+      const hit = sites.landable(this.position, this.scratch);
+      if (hit >= 0) this.land(sites.frame(hit, this.scratch));
     }
     return this;
   }
@@ -336,21 +359,19 @@ export class BeeFlight {
   /**
    * Elevation angle from the eye to the nearest flower head.
    *
-   * There is one flower today and it stands at the origin, but it sways, so
-   * the frame the GPU publishes is the honest source for where its head
-   * actually is; the static height is the fallback for the first frames,
-   * before any frame has arrived. A list is the honest shape for "nearest"
-   * even at a length of one -- adding a second flower is then a list change
-   * and nothing else.
+   * The table the GPU publishes is the honest source for where the heads
+   * actually are -- they sway, and the sway is solved there. The reference
+   * plant's height is the fallback for the first frames, before any readback
+   * has landed. This was written against a list when there was one flower in
+   * it, on the grounds that "nearest" is a list operation whatever the length;
+   * scaling it to several hundred was a one-line change, which is the whole
+   * argument for having done it that way.
    */
-  aimPitch(frame) {
-    const heads = frame ? [frame.pos] : [[0, FLOWER.stemHeight, 0]];
-    let best = heads[0], bestD = Infinity;
-    for (const h of heads) {
-      const d = Math.hypot(h[0] - this.position[0],
-                           h[1] - this.position[1],
-                           h[2] - this.position[2]);
-      if (d < bestD) { bestD = d; best = h; }
+  aimPitch(sites) {
+    let best = [0, FLOWER.stemHeight, 0];
+    if (sites && sites.count > 0) {
+      const i = sites.nearest(this.position);
+      if (i >= 0) best = sites.frame(i, this.scratch).pos;
     }
     const flat = Math.hypot(best[0] - this.position[0], best[2] - this.position[2]);
     // atan2 rather than atan: hovering directly over the head takes `flat` to
@@ -387,15 +408,32 @@ export class BeeFlight {
   }
 
   /** Camera up: the surface normal while crawling, world up while flying. */
-  upVector(frame) {
-    if (this.mode === 'crawl' && frame) return this.surfaceState(frame).normal;
+  upVector(sites) {
+    const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
+    if (frame) return this.surfaceState(frame).normal;
     return [0, 1, 0];
   }
 
   /** Camera forward: the walk heading while crawling, the look while flying. */
-  viewForward(frame) {
-    if (this.mode === 'crawl' && frame) return this.surfaceState(frame).forward;
+  viewForward(sites) {
+    const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
+    if (frame) return this.surfaceState(frame).forward;
     return this.forward();
+  }
+
+  /** Where the lens should focus: the head underfoot, or the nearest one. */
+  focusTarget(sites) {
+    if (this.mode === 'crawl') {
+      const fwd = this.viewForward(sites);
+      return [this.position[0] + fwd[0] * 0.035,
+              this.position[1] + fwd[1] * 0.035,
+              this.position[2] + fwd[2] * 0.035];
+    }
+    if (sites && sites.count > 0) {
+      const i = sites.nearest(this.position);
+      if (i >= 0) return sites.frame(i, this.scratch).pos.slice(0, 3);
+    }
+    return [0, FLOWER.stemHeight, 0];
   }
 
   get speed() { return Math.hypot(...this.velocity); }
