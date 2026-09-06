@@ -12,7 +12,10 @@ export const SENSOR_HEIGHT = 0.024;   // full-frame, metres
 export class MacroCamera {
   constructor() {
     this.target = [0, 0.40, 0];       // the flower head
-    this.distance = 0.20;
+    // Far enough back that the whole head plus some stem is in frame; at 0.20
+    // the flower filled better than 80% of the height and read as a wall of
+    // petals rather than a flower.
+    this.distance = 0.26;
     this.yaw = 0.75;
     this.pitch = 0.22;
 

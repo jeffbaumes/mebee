@@ -46,58 +46,78 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   // conditional return here would put every workgroupBarrier below into
   // non-uniform control flow.
   let i = lid.x;
-
-  let dt = clamp(G.state.w, 1.0 / 240.0, 1.0 / 30.0);
   let restH = f32(i) / f32(STEM_NODES - 1u);
+  let segLen = G.plant.y;
+
+  // Fixed timestep with substeps. Verlet's `pos - prev` carries a velocity
+  // that assumes a constant step, so feeding it a real frame time made the
+  // solve frame-rate dependent: measured offline, the tip moved 0.6mm per
+  // frame at a steady 60Hz and 79mm per frame with jittery frame times.
+  let FIXED_DT = 1.0 / 60.0;
+  let steps = u32(clamp(G.state.w / FIXED_DT, 1.0, 4.0) + 0.5);
 
   var node = stemNodes[i];
   var pos = node.pos.xyz;
   var prev = node.prev.xyz;
 
-  // --- Verlet integration ------------------------------------------------
-  if (i > 0u) {
-    let drag = windAt(pos, G.windParams.y);
-    // Thin stems catch wind roughly with the square of height: more lever arm
-    // and more exposed area away from the ground.
-    let expose = restH * restH;
-    let accel = drag * 9.0 * expose + vec3f(0.0, -9.81, 0.0) * 0.045;
-    let vel = (pos - prev) * 0.985;
-    let next = pos + vel + accel * dt * dt;
-    prev = pos;
-    pos = next;
-  }
-  wsPos[i] = pos;
-  workgroupBarrier();
+  for (var step = 0u; step < steps; step++) {
+    // --- integrate -------------------------------------------------------
+    if (i > 0u) {
+      let drag = windAt(pos, G.windParams.y);
+      // Thin stems catch wind roughly with the square of height: more lever
+      // arm and more exposed area away from the ground.
+      let expose = restH * restH;
+      let accel = drag * 12.0 * expose + vec3f(0.0, -9.81, 0.0) * 0.045;
+      let vel = (pos - prev) * 0.96;
+      let next = pos + vel + accel * FIXED_DT * FIXED_DT;
+      prev = pos;
+      pos = next;
+    }
+    wsPos[i] = pos;
+    workgroupBarrier();
 
-  // --- constraint solve --------------------------------------------------
-  let segLen = G.plant.y;   // rest length of one stem segment
-  for (var iter = 0; iter < 8; iter++) {
-    // Distance constraints, red/black split so neighbours never fight over the
-    // same node inside one pass.
-    for (var parity = 0u; parity < 2u; parity++) {
-      if (i > 0u && (i % 2u) == parity) {
-        let a = wsPos[i - 1u];
-        var d = wsPos[i] - a;
-        let l = max(1e-6, length(d));
-        wsPos[i] = a + d * (segLen / l);
+    // --- constraint solve -------------------------------------------------
+    for (var iter = 0; iter < 8; iter++) {
+      // Pinning node 1 as well as node 0 anchors the base DIRECTION, not just
+      // its position. Without it the chain is a rope hanging from a point:
+      // gravity rotates the whole thing about the root and the stem folds flat
+      // to the ground, which is exactly what it did.
+      if (i == 0u) { wsPos[0] = vec3f(0.0, 0.0, 0.0); }
+      if (i == 1u) { wsPos[1] = vec3f(0.0, segLen, 0.0); }
+      workgroupBarrier();
+
+      // Distance constraints, red/black split so neighbours never fight over
+      // the same node inside one pass.
+      for (var parity = 0u; parity < 2u; parity++) {
+        if (i >= 2u && (i % 2u) == parity) {
+          let a = wsPos[i - 1u];
+          let d = wsPos[i] - a;
+          let l = max(1e-6, length(d));
+          wsPos[i] = a + d * (segLen / l);
+        }
+        workgroupBarrier();
+      }
+
+      // Bending. The target blends the straight continuation of the parent
+      // segment with the rest pose, so the stem remembers being upright rather
+      // than merely remembering being straight -- a straight stem lying flat
+      // satisfies a pure straightness constraint perfectly well.
+      if (i >= 2u) {
+        let a = wsPos[i - 2u];
+        let b = wsPos[i - 1u];
+        let d = b - a;
+        let cont = d / max(1e-6, length(d));
+        let mixed = mix(cont, vec3f(0.0, 1.0, 0.0), 0.10);
+        let straight = b + normalize(mixed) * segLen;
+        wsPos[i] = mix(wsPos[i], straight, 0.28);
       }
       workgroupBarrier();
     }
-    // Bending: pull each node toward the straight continuation of its parent
-    // segment. Without this the chain folds up like wet string.
-    if (i >= 2u && i < STEM_NODES) {
-      let a = wsPos[i - 2u];
-      let b = wsPos[i - 1u];
-      let straight = b + normalize(b - a) * segLen;
-      wsPos[i] = mix(wsPos[i], straight, 0.28);
-    }
+
+    pos = wsPos[i];
     workgroupBarrier();
   }
 
-  if (i == 0u) { wsPos[0] = vec3f(0.0, 0.0, 0.0); }
-  workgroupBarrier();
-
-  pos = wsPos[i];
   node.pos = vec4f(pos, restH);
   node.prev = vec4f(prev, 0.0);
   stemNodes[i] = node;
@@ -114,12 +134,14 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   if (i == 0u) {
     var refDir = vec3f(1.0, 0.0, 0.0);
     for (var k = 0u; k < STEM_NODES; k++) {
-      var axis: vec3f;
-      if (k + 1u < STEM_NODES) {
-        axis = normalize(wsPos[k + 1u] - wsPos[k]);
-      } else {
-        axis = normalize(wsPos[k] - wsPos[k - 1u]);
-      }
+      // Guard the normalise: two coincident nodes give a zero vector, and the
+      // resulting NaN propagates through every vertex skinned to this frame,
+      // scattering the whole plant. Cheap insurance against a solver hiccup.
+      var seg: vec3f;
+      if (k + 1u < STEM_NODES) { seg = wsPos[k + 1u] - wsPos[k]; }
+      else { seg = wsPos[k] - wsPos[k - 1u]; }
+      var axis = vec3f(0.0, 1.0, 0.0);
+      if (length(seg) > 1e-7) { axis = normalize(seg); }
       var side = refDir - axis * dot(refDir, axis);
       if (length(side) < 1e-4) { side = vec3f(0.0, 0.0, 1.0) - axis * dot(vec3f(0.0, 0.0, 1.0), axis); }
       side = normalize(side);
@@ -133,7 +155,9 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     var site: LandingSite;
     site.pos = vec4f(top.pos.xyz, 0.011);
     site.normal = vec4f(top.axis.xyz, 1.0 - G.state.y);
-    site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / dt, 0.0);
+    // Pad velocity, for a lander to match: derived from the same fixed step
+    // the solve uses, not the frame time.
+    site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / FIXED_DT, 0.0);
     landing[0] = site;
   }
 }

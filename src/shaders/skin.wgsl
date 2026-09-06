@@ -57,7 +57,9 @@ fn skinToStem(restPos: vec3f, nrm: vec3f, tan: vec3f,
   let t = G.windParams.y;
   let strength = G.windParams.x;
   let phase = variant * 43.0 + t * (2.7 + variant * 1.4);
-  let amp = strength * 0.010 * axis * axis;
+  // 10mm of flutter reads as violent on a 23mm petal; at 4.5mm it is a
+  // tremble rather than a flap.
+  let amp = strength * 0.0045 * axis * axis;
   let wobble = vec3f(sin(phase), sin(phase * 1.37 + 1.1) * 0.45, cos(phase * 0.91));
   out.pos += wobble * amp;
   return out;
