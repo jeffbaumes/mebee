@@ -11,17 +11,17 @@ export const BOUNDS = {
   margin: 0.09,
 };
 
-const CRUISE = 0.16;        // m/s of forward drift
-const CLIMB = 0.30;         // m/s added while boosting
-const SINK = 0.075;         // m/s of gentle settle with no input
+const CRUISE = 0.060;       // m/s of forward drift, on the horizontal only
+const CLIMB = 0.160;        // m/s added while boosting
+const SINK = 0.045;         // m/s of gentle settle with no input
 const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
 const HORIZ_LAG = 3.6;      // 1/s
-// 2.4 rad/s puts a full turn at about 2.6 seconds of held stick. At 1.5 it was
-// over four, which reads as the controls ignoring you.
-const TURN_RATE = 2.4;      // rad/s at full stick
-const PITCH_RATE = 0.85;    // rad/s at full stick
-const PITCH_LIMIT = 0.70;   // rad
-const PITCH_CENTRE = 1.4;   // 1/s that pitch returns to level when released
+const TURN_RATE = 1.2;      // rad/s at full stick; a full circle in ~5s
+const PITCH_RATE = 0.85;    // rad/s at full stick -- view only, see update()
+// Wider than before: now that pitch is view-only it cannot get you into
+// trouble, so there is no reason not to let you look up at the flower.
+const PITCH_LIMIT = 0.95;   // rad, about 54 degrees
+const PITCH_CENTRE = 0.7;   // 1/s that the view drifts back to level
 const WALL_PUSH = 2.6;      // m/s^2 at the very edge of the cushion
 
 /** Exponential approach that is correct for any timestep. */
@@ -44,7 +44,7 @@ export class BeeFlight {
     this.boost = 0;
   }
 
-  /** Unit heading, including pitch. */
+  /** Where the camera looks: heading plus pitch. Travel ignores the pitch. */
   forward() {
     const cp = Math.cos(this.pitch);
     return [Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp];
@@ -63,18 +63,24 @@ export class BeeFlight {
       this.pitch = approach(this.pitch, 0, PITCH_CENTRE, step);
     }
 
-    const fwd = this.forward();
     const v = this.velocity;
 
-    // Horizontal drift follows the heading, with enough lag that a hard turn
-    // carries the bee wide rather than pivoting it on the spot.
-    v[0] = approach(v[0], fwd[0] * CRUISE, HORIZ_LAG, step);
-    v[2] = approach(v[2], fwd[2] * CRUISE, HORIZ_LAG, step);
+    // Heading drives travel; pitch does not. Looking up or down aims the
+    // camera and nothing else, so the two axes of the stick never fight: one
+    // turns you, the other only changes what you can see. Flying where you are
+    // looking sounds natural and is in practice the thing that makes a free
+    // camera hard to hold level.
+    const hx = Math.sin(this.yaw), hz = Math.cos(this.yaw);
+    // Enough lag that a hard turn carries the bee wide rather than pivoting it
+    // on the spot.
+    v[0] = approach(v[0], hx * CRUISE, HORIZ_LAG, step);
+    v[2] = approach(v[2], hz * CRUISE, HORIZ_LAG, step);
 
-    // Altitude is deliberately the laggiest axis: press and the climb builds
-    // over about half a second, release and it bleeds away over the same.
-    // That delay is the whole feel of a bee-suit hover.
-    const targetVy = fwd[1] * CRUISE + this.boost * CLIMB - SINK;
+    // Altitude comes from the boost and gravity, nothing else. It is
+    // deliberately the laggiest axis: press and the climb builds over about
+    // half a second, release and it bleeds away over the same. That delay is
+    // the whole feel of a bee-suit hover.
+    const targetVy = this.boost * CLIMB - SINK;
     v[1] = approach(v[1], targetVy, VERT_LAG, step);
 
     for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
