@@ -26,6 +26,13 @@ window.addEventListener('error', (e) => reportFatal(e.message, e.filename ? `${e
 window.addEventListener('unhandledrejection', (e) =>
   reportFatal(e.reason?.message ?? String(e.reason), 'unhandled rejection'));
 
+// A long press must not raise the callout menu, and iOS page-pinch must not
+// fight the in-canvas gestures. Both are document-level and cannot be handled
+// by touch-action alone.
+document.addEventListener('contextmenu', (e) => e.preventDefault());
+document.addEventListener('gesturestart', (e) => e.preventDefault());
+document.addEventListener('gesturechange', (e) => e.preventDefault());
+
 const canvas = document.getElementById('view');
 const hud = document.getElementById('hud');
 const fpsEl = document.getElementById('fps');
@@ -75,7 +82,10 @@ function fail(message, detail) {
 
 // --- input -----------------------------------------------------------------
 // Radius, in CSS pixels, at which the steering drag reaches full deflection.
-const STICK_RADIUS = 90;
+// 60 rather than 90: the stick appears under the thumb, so this is the whole
+// travel available without repositioning the hand.
+const STICK_RADIUS = 60;
+const STICK_SIZE = 132;
 
 function bindInput() {
   const pointers = new Map();
@@ -86,6 +96,23 @@ function bindInput() {
   // Virtual stick: where the steering drag started, and where it is now.
   let stickId = null;
   let stickOrigin = { x: 0, y: 0 };
+  const stickEl = document.getElementById('stick');
+  const knobEl = document.getElementById('stick-knob');
+
+  /** Move the joystick under the thumb, so no reach is ever required. */
+  const placeStick = (x, y) => {
+    stickEl.style.left = `${x - STICK_SIZE / 2}px`;
+    stickEl.style.top = `${y - STICK_SIZE / 2}px`;
+    stickEl.style.bottom = 'auto';
+    stickEl.classList.add('active');
+  };
+  const restStick = () => {
+    stickEl.style.left = '';
+    stickEl.style.top = '';
+    stickEl.style.bottom = '';
+    stickEl.classList.remove('active');
+    knobEl.style.transform = '';
+  };
 
   canvas.addEventListener('pointerdown', (e) => {
     canvas.setPointerCapture(e.pointerId);
@@ -94,6 +121,7 @@ function bindInput() {
     if (state.mode === 'fly' && stickId === null) {
       stickId = e.pointerId;
       stickOrigin = { x: e.clientX, y: e.clientY };
+      placeStick(e.clientX, e.clientY);
     }
   });
 
@@ -109,10 +137,17 @@ function bindInput() {
       // keeps turning. Delta steering would need continuous thumb travel to
       // hold a turn, which is unusable on a phone.
       if (e.pointerId === stickId) {
-        bee.steer = [
-          Math.max(-1, Math.min(1, (e.clientX - stickOrigin.x) / STICK_RADIUS)),
-          Math.max(-1, Math.min(1, (e.clientY - stickOrigin.y) / STICK_RADIUS)),
-        ];
+        // Clamp to a disc, not a square, so a diagonal drag cannot exceed full
+        // deflection on both axes at once.
+        let ox = e.clientX - stickOrigin.x;
+        let oy = e.clientY - stickOrigin.y;
+        const len = Math.hypot(ox, oy);
+        if (len > STICK_RADIUS) {
+          ox *= STICK_RADIUS / len;
+          oy *= STICK_RADIUS / len;
+        }
+        bee.steer = [ox / STICK_RADIUS, oy / STICK_RADIUS];
+        knobEl.style.transform = `translate(${ox}px, ${oy}px)`;
       }
       return;
     }
@@ -133,6 +168,7 @@ function bindInput() {
     if (e.pointerId === stickId) {
       stickId = null;
       bee.steer = [0, 0];          // release levels the bee out
+      restStick();
     }
     if (pointers.size < 2) lastPinch = 0;
     if (pointers.size > 0) return;
@@ -184,6 +220,7 @@ function setMode(mode) {
   const flying = mode === 'fly';
   document.getElementById('mode').textContent = flying ? 'Orbit' : 'Fly';
   document.getElementById('boost').hidden = !flying;
+  document.getElementById('stick').hidden = !flying;
   document.getElementById('hint').hidden = !flying;
   bee.steer = [0, 0];
   bee.boost = 0;

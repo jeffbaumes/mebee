@@ -16,7 +16,9 @@ const CLIMB = 0.30;         // m/s added while boosting
 const SINK = 0.075;         // m/s of gentle settle with no input
 const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
 const HORIZ_LAG = 3.6;      // 1/s
-const TURN_RATE = 1.5;      // rad/s at full stick
+// 2.4 rad/s puts a full turn at about 2.6 seconds of held stick. At 1.5 it was
+// over four, which reads as the controls ignoring you.
+const TURN_RATE = 2.4;      // rad/s at full stick
 const PITCH_RATE = 0.85;    // rad/s at full stick
 const PITCH_LIMIT = 0.70;   // rad
 const PITCH_CENTRE = 1.4;   // 1/s that pitch returns to level when released
