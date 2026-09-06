@@ -4,6 +4,8 @@
 // -- forward drift, sink, the way altitude lags behind the thumb -- comes from
 // the model, so the player is never asked to hold a heading or manage speed.
 
+import { FLOWER } from '../geom/flower.js';
+
 /** Play volume. The bee cannot leave it; `margin` is the soft cushion inside. */
 export const BOUNDS = {
   min: [-0.40, 0.020, -0.40],
@@ -24,18 +26,31 @@ const TURN_RATE = 1.2;      // rad/s at full stick; a full circle in ~5s
 const VIEW_TILT = 1.1;      // rad per m/s of vertical velocity
 const VIEW_TILT_LIMIT = 0.22;
 const VIEW_TILT_LAG = 3.0;  // 1/s
-// The higher you get, the more you look down. Level flight at altitude points
-// the camera at empty sky, which is both useless and gives no read on where
-// you are; tipping the view toward the ground keeps the world in frame.
-const ALT_LOOK_DOWN = 0.55; // rad at the ceiling
+// The view's altitude angle gravitates toward the nearest flower head, so the
+// subject stays in frame without ever being steered at. This replaces a plain
+// "look further down the higher you are", which aimed at the ground rather
+// than at the one thing in the scene worth looking at -- and which pointed
+// nowhere useful when the bee was low but far out.
+const AIM_PITCH_LIMIT = 1.05;  // rad. Short of vertical on purpose: the flying
+                               // camera's up is world up, and a look straight
+                               // down the up-vector has no defined roll.
 const WALL_PUSH = 2.6;      // m/s^2 at the very edge of the cushion
 
 // --- crawl -----------------------------------------------------------------
 // The landable surface is an oblate ellipsoid standing in for the flower head.
 // Approximating rather than colliding against the real petals means the walk
-// never catches on a notch or falls between two florets, and the bee can round
-// the rim onto the underside without any special case.
+// never catches on a notch and never falls between two florets.
 export const CRAWL_AXES = [0.040, 0.013, 0.040];
+// Only the TOP of that ellipsoid is walkable -- a dome, not a whole shell.
+// Carrying on around the rim took the bee through a band where the surface
+// stands vertical and then onto the underside, which reads as the bee being
+// glued to a cliff rather than standing on a flower. The walk stops short of
+// it instead. Because the head is oblate the surface at this elevation is
+// already leaning about 46 degrees from the head's axis, which is as far over
+// as is worth walking.
+const CRAWL_MIN_ELEVATION = 0.30;                       // rad above the rim
+const CRAWL_MIN_Y = Math.sin(CRAWL_MIN_ELEVATION);
+const CRAWL_RIM_XZ = Math.cos(CRAWL_MIN_ELEVATION);
 // Capture shell, as a uniform margin in metres around the ellipsoid rather
 // than a scale factor. A normalised threshold looks even but is not: at 1.3 it
 // reaches 12mm out at the rim and only 4mm above the disc, because the head is
@@ -82,6 +97,24 @@ const rotToWorld = (b, l) => [
 function toLocal(b, w) {
   const d = [w[0] - b.o[0], w[1] - b.o[1], w[2] - b.o[2]];
   return [dot3(d, b.x), dot3(d, b.y), dot3(d, b.z)];
+}
+
+/**
+ * Push a point back onto the dome if the walk stepped off its rim.
+ *
+ * Clamping the elevation and renormalising the horizontal part means walking
+ * into the rim slides along it rather than stopping dead, so the edge reads as
+ * a lip you can follow round rather than a wall you bump into -- and either
+ * way there is no way over it.
+ */
+function clampToDome(n) {
+  if (n[1] >= CRAWL_MIN_Y) return n;
+  const horiz = Math.hypot(n[0], n[2]);
+  // The floor is strictly positive, so the only direction with no horizontal
+  // component at all is straight down. Put that back on top of the dome.
+  if (horiz < 1e-9) return [0, 1, 0];
+  const s = CRAWL_RIM_XZ / horiz;
+  return [n[0] * s, CRAWL_MIN_Y, n[2] * s];
 }
 
 /** Tangent basis of the unit sphere at `n`. */
@@ -157,7 +190,9 @@ export class BeeFlight {
     const b = headBasis(frame);
     const A = CRAWL_AXES;
     const l = toLocal(b, this.position);
-    this.surfaceDir = norm3([l[0] / A[0], l[1] / A[1], l[2] / A[2]]);
+    // An approach from the side or from underneath lands below the rim; seat
+    // it on the dome rather than outside the surface the walk can reach.
+    this.surfaceDir = clampToDome(norm3([l[0] / A[0], l[1] / A[1], l[2] / A[2]]));
     // Carry the approach direction into the walk so landing does not spin the
     // view; fall back to any tangent if the bee arrived nearly stationary.
     const { e1, e2 } = tangentBasis(this.surfaceDir);
@@ -213,9 +248,15 @@ export class BeeFlight {
       const dNext = norm3([
         -n[0] * sn + d[0] * c, -n[1] * sn + d[1] * c, -n[2] * sn + d[2] * c,
       ]);
-      this.surfaceDir = next;
-      const nb = tangentBasis(next);
-      this.surfaceHeading = Math.atan2(dot3(dNext, nb.e2), dot3(dNext, nb.e1));
+      // Collide with the rim instead of walking over it.
+      const landed = clampToDome(next);
+      this.surfaceDir = landed;
+      const nb = tangentBasis(landed);
+      // Re-project the transported heading into the tangent plane of wherever
+      // the step actually ended up. Into the rim that keeps whatever component
+      // still runs along it, which is what turns the stop into a slide.
+      const t1 = dot3(dNext, nb.e1), t2 = dot3(dNext, nb.e2);
+      if (Math.hypot(t1, t2) > 1e-6) this.surfaceHeading = Math.atan2(t2, t1);
     }
 
     const st = this.surfaceState(frame);
@@ -260,15 +301,18 @@ export class BeeFlight {
     const targetVy = this.boost * CLIMB - SINK;
     v[1] = approach(v[1], targetVy, VERT_LAG, step);
 
-    const climbTilt = Math.max(-VIEW_TILT_LIMIT,
-      Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
-    const altFrac = Math.max(0, Math.min(1,
-      (this.position[1] - BOUNDS.min[1]) / (BOUNDS.max[1] - BOUNDS.min[1])));
-    this.pitch = approach(this.pitch, climbTilt - altFrac * ALT_LOOK_DOWN,
-      VIEW_TILT_LAG, step);
-
     for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
     this.applyBounds(step);
+
+    // Aim after moving, so the angle is the one this frame is rendered from.
+    // The climb tilt rides on top as feedback: the camera still noses up as
+    // the bee climbs and down as it settles, which is how you read your own
+    // vertical motion without an instrument.
+    const climbTilt = Math.max(-VIEW_TILT_LIMIT,
+      Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
+    const target = Math.max(-AIM_PITCH_LIMIT,
+      Math.min(AIM_PITCH_LIMIT, this.aimPitch(frame) + climbTilt));
+    this.pitch = approach(this.pitch, target, VIEW_TILT_LAG, step);
 
     // Touchdown. Tested in ellipsoid-normalised space, where the surface is
     // exactly the unit sphere whatever the head's orientation.
@@ -283,6 +327,35 @@ export class BeeFlight {
       if (r < 1.0) this.land(frame);
     }
     return this;
+  }
+
+  /**
+   * Elevation angle from the eye to the nearest flower head.
+   *
+   * There is one flower today and it stands at the origin, but it sways, so
+   * the frame the GPU publishes is the honest source for where its head
+   * actually is; the static height is the fallback for the first frames,
+   * before any frame has arrived. A list is the honest shape for "nearest"
+   * even at a length of one -- adding a second flower is then a list change
+   * and nothing else.
+   */
+  aimPitch(frame) {
+    const heads = frame ? [frame.pos] : [[0, FLOWER.stemHeight, 0]];
+    let best = heads[0], bestD = Infinity;
+    for (const h of heads) {
+      const d = Math.hypot(h[0] - this.position[0],
+                           h[1] - this.position[1],
+                           h[2] - this.position[2]);
+      if (d < bestD) { bestD = d; best = h; }
+    }
+    const flat = Math.hypot(best[0] - this.position[0], best[2] - this.position[2]);
+    // atan2 rather than atan: hovering directly over the head takes `flat` to
+    // zero, and the aim there wants to be straight down, not undefined. The
+    // clamp belongs here rather than at the call site -- straight down IS what
+    // this returns from overhead, and an unusable view angle should never
+    // leave the method that knows why it is capped.
+    const a = Math.atan2(best[1] - this.position[1], flat);
+    return Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT, a));
   }
 
   /**

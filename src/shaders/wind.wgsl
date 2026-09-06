@@ -22,74 +22,85 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
   let restH = f32(i) / f32(STEM_NODES - 1u);
   let segLen = G.plant.y;
 
-  // Fixed timestep with substeps. Verlet's `pos - prev` carries a velocity
-  // that assumes a constant step, so feeding it a real frame time made the
-  // solve frame-rate dependent: measured offline, the tip moved 0.6mm per
-  // frame at a steady 60Hz and 79mm per frame with jittery frame times.
-  let FIXED_DT = 1.0 / 60.0;
-  let steps = u32(clamp(G.state.w / FIXED_DT, 1.0, 4.0) + 0.5);
+  // EXACTLY one step per frame, of the length the host hands us in plant.z.
+  //
+  // Two rules, both learned the hard way and both checked by tools/sim-stem.mjs:
+  //
+  // Never more than one step. The step COUNT used to come from the
+  // instantaneous frame time, rounded -- so a hitch (a GC pause, a texture
+  // upload, a tab regaining focus) spent two or three steps in a single frame
+  // and the whole head lurched. Measured offline, the tip's frame-to-frame
+  // movement went 0.13mm -> 1.03mm on exactly those frames, which is the jump
+  // you could see. Falling a few ms behind the wall clock is invisible; the
+  // lurch is not.
+  //
+  // Never a step that moves. Verlet's `pos - prev` is a velocity that assumes
+  // the last step was as long as this one, so a step driven by the raw frame
+  // time explodes -- 49mm per frame, buzzing at 9.5Hz, even with the standard
+  // dt/dtPrev correction, because the constraint projection breaks the
+  // invariant that correction relies on. The host therefore snaps the step to
+  // a standard refresh interval and holds it there.
+  let h = G.plant.z;
 
   var node = stemNodes[i];
   var pos = node.pos.xyz;
   var prev = node.prev.xyz;
 
-  for (var step = 0u; step < steps; step++) {
-    // --- integrate -------------------------------------------------------
-    if (i > 0u) {
-      let drag = windAt(pos, G.windParams.y);
-      // Thin stems catch wind roughly with the square of height: more lever
-      // arm and more exposed area away from the ground.
-      let expose = restH * restH;
-      let accel = drag * 12.0 * expose + vec3f(0.0, -9.81, 0.0) * 0.045;
-      let vel = (pos - prev) * 0.96;
-      let next = pos + vel + accel * FIXED_DT * FIXED_DT;
-      prev = pos;
-      pos = next;
-    }
-    wsPos[i] = pos;
+  // --- integrate -------------------------------------------------------
+  if (i > 0u) {
+    let drag = windAt(pos, G.windParams.y);
+    // Thin stems catch wind roughly with the square of height: more lever
+    // arm and more exposed area away from the ground.
+    let expose = restH * restH;
+    let accel = drag * 12.0 * expose + vec3f(0.0, -9.81, 0.0) * 0.045;
+    let vel = (pos - prev) * 0.96;
+    let next = pos + vel + accel * h * h;
+    prev = pos;
+    pos = next;
+  }
+  wsPos[i] = pos;
+  workgroupBarrier();
+
+  // --- constraint solve -------------------------------------------------
+  for (var iter = 0; iter < 8; iter++) {
+    // Pinning node 1 as well as node 0 anchors the base DIRECTION, not just
+    // its position. Without it the chain is a rope hanging from a point:
+    // gravity rotates the whole thing about the root and the stem folds flat
+    // to the ground, which is exactly what it did.
+    if (i == 0u) { wsPos[0] = vec3f(0.0, 0.0, 0.0); }
+    if (i == 1u) { wsPos[1] = vec3f(0.0, segLen, 0.0); }
     workgroupBarrier();
 
-    // --- constraint solve -------------------------------------------------
-    for (var iter = 0; iter < 8; iter++) {
-      // Pinning node 1 as well as node 0 anchors the base DIRECTION, not just
-      // its position. Without it the chain is a rope hanging from a point:
-      // gravity rotates the whole thing about the root and the stem folds flat
-      // to the ground, which is exactly what it did.
-      if (i == 0u) { wsPos[0] = vec3f(0.0, 0.0, 0.0); }
-      if (i == 1u) { wsPos[1] = vec3f(0.0, segLen, 0.0); }
-      workgroupBarrier();
-
-      // Distance constraints, red/black split so neighbours never fight over
-      // the same node inside one pass.
-      for (var parity = 0u; parity < 2u; parity++) {
-        if (i >= 2u && (i % 2u) == parity) {
-          let a = wsPos[i - 1u];
-          let d = wsPos[i] - a;
-          let l = max(1e-6, length(d));
-          wsPos[i] = a + d * (segLen / l);
-        }
-        workgroupBarrier();
-      }
-
-      // Bending. The target blends the straight continuation of the parent
-      // segment with the rest pose, so the stem remembers being upright rather
-      // than merely remembering being straight -- a straight stem lying flat
-      // satisfies a pure straightness constraint perfectly well.
-      if (i >= 2u) {
-        let a = wsPos[i - 2u];
-        let b = wsPos[i - 1u];
-        let d = b - a;
-        let cont = d / max(1e-6, length(d));
-        let mixed = mix(cont, vec3f(0.0, 1.0, 0.0), 0.10);
-        let straight = b + normalize(mixed) * segLen;
-        wsPos[i] = mix(wsPos[i], straight, 0.28);
+    // Distance constraints, red/black split so neighbours never fight over
+    // the same node inside one pass.
+    for (var parity = 0u; parity < 2u; parity++) {
+      if (i >= 2u && (i % 2u) == parity) {
+        let a = wsPos[i - 1u];
+        let d = wsPos[i] - a;
+        let l = max(1e-6, length(d));
+        wsPos[i] = a + d * (segLen / l);
       }
       workgroupBarrier();
     }
 
-    pos = wsPos[i];
+    // Bending. The target blends the straight continuation of the parent
+    // segment with the rest pose, so the stem remembers being upright rather
+    // than merely remembering being straight -- a straight stem lying flat
+    // satisfies a pure straightness constraint perfectly well.
+    if (i >= 2u) {
+      let a = wsPos[i - 2u];
+      let b = wsPos[i - 1u];
+      let d = b - a;
+      let cont = d / max(1e-6, length(d));
+      let mixed = mix(cont, vec3f(0.0, 1.0, 0.0), 0.10);
+      let straight = b + normalize(mixed) * segLen;
+      wsPos[i] = mix(wsPos[i], straight, 0.28);
+    }
     workgroupBarrier();
   }
+
+  pos = wsPos[i];
+  workgroupBarrier();
 
   node.pos = vec4f(pos, restH);
   node.prev = vec4f(prev, 0.0);
@@ -128,9 +139,9 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u) {
     var site: LandingSite;
     site.pos = vec4f(top.pos.xyz, 0.011);
     site.normal = vec4f(top.axis.xyz, 1.0 - G.state.y);
-    // Pad velocity, for a lander to match: derived from the same fixed step
-    // the solve uses, not the frame time.
-    site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / FIXED_DT, 0.0);
+    // Pad velocity, for a lander to match: derived from the same step the
+    // solve actually used, not the frame time.
+    site.velocity = vec4f((top.pos.xyz - top.prev.xyz) / max(1e-6, h), 0.0);
     // The side vector completes the frame: with it the host can reconstruct
     // the head's full orientation and put a crawl surface on it that sways
     // with the flower, without duplicating the solve on the CPU.

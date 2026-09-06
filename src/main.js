@@ -87,6 +87,27 @@ function fail(message, detail) {
 const STICK_RADIUS = 60;
 const STICK_SIZE = 132;
 
+// A macro lens is a telescope to fly with. At bee scale a narrow view gives
+// nothing to navigate by -- the flower fills the frame or is not in it at all.
+const FLY_FOCAL = 0.020;     // 62 deg vertical
+// Crawling, the flower head IS the floor, and the eye sits 4mm off it looking
+// along the surface. A longer lens looks straight over the florets underfoot
+// into the sky, so the walk loses the only thing it is walking on: at 62 deg
+// the surface starts 7mm ahead of the bee, at 74 deg it starts at 5mm and the
+// lower third of the frame is flower.
+const CRAWL_FOCAL = 0.016;   // 74 deg vertical
+const ORBIT_FOCAL = 0.055;   // the macro lens the still images are shot on
+
+/** Set the lens, keeping the panel's slider honest about what it is. */
+function setFocalLength(metres) {
+  camera.focalLength = metres;
+  const fl = document.getElementById('focalLength');
+  if (fl) {
+    fl.value = metres;
+    fl.dispatchEvent(new Event('input'));
+  }
+}
+
 function bindInput() {
   const pointers = new Map();
   let lastPinch = 0;
@@ -229,20 +250,13 @@ function setMode(mode) {
 
   if (flying) {
     bee.reset();
-    // A macro lens is a telescope to fly with. Widen for flight, and put the
-    // aperture back where the depth of field still reads at this distance.
-    camera.focalLength = 0.030;
     camera.mode = 'fly';
+    setFocalLength(FLY_FOCAL);
   } else {
-    camera.focalLength = 0.055;
     camera.mode = 'orbit';
+    setFocalLength(ORBIT_FOCAL);
     camera.resetFraming();
     camera.frameSubject(HEAD_RADIUS, canvas.width / canvas.height);
-  }
-  const fl = document.getElementById('focalLength');
-  if (fl) {
-    fl.value = camera.focalLength;
-    fl.dispatchEvent(new Event('input'));
   }
 }
 
@@ -406,6 +420,8 @@ function resizeCanvas() {
       if (bee.mode !== lastBeeMode) {
         lastBeeMode = bee.mode;
         const crawling = bee.mode === 'crawl';
+        // Landing and taking off swap the lens: see CRAWL_FOCAL.
+        setFocalLength(crawling ? CRAWL_FOCAL : FLY_FOCAL);
         boostLabel.textContent = crawling ? 'TAKE OFF' : 'CLIMB';
         hintEl.textContent = crawling
           ? 'stick: walk the flower \u00b7 take off to leave'

@@ -14,6 +14,11 @@ import { BOUNDS } from '../sim/flight.js';
 import { projectSkySH, shToIrradiance } from './sky.js';
 import { mat4, lookAt, ortho, multiply, normalize } from './math.js';
 
+// Refresh intervals real displays run at, never longer than the 1/60 the stem
+// solver's wind constants were tuned against. tools/sim-stem.mjs measures what
+// happens off this ladder: stepping at 1/48 grew the tip's sway by half.
+const REFRESH_LADDER = [1 / 144, 1 / 120, 1 / 90, 1 / 75, 1 / 60];
+
 const HDR_FORMAT = 'rgba16float';
 const DEPTH_FORMAT = 'depth32float';
 const SHADOW_SIZE = 2048;
@@ -167,6 +172,10 @@ export class Renderer {
     this.landingFree = [0, 1, 2];
     /** @type {{pos:number[], up:number[], side:number[], velocity:number[]}|null} */
     this.headFrame = null;
+    // Stem solver step. Exactly one step runs per frame; this is how long it
+    // is. See updateSolveStep, and tools/sim-stem.mjs for the measurements.
+    this.frameAvg = 1 / 60;
+    this.solveStep = 1 / 60;
 
     // Pollen motes, seeded through the volume around the flower.
     const motes = new Float32Array(POLLEN_COUNT * 8);
@@ -625,6 +634,29 @@ export class Renderer {
     this.sunSH = shToIrradiance(projectSkySH(sunDir, 512));
   }
 
+  /**
+   * Choose the fixed step the stem solver runs at, from the frame time.
+   *
+   * The solver takes exactly one step per frame -- never a catch-up burst,
+   * because spending two or three steps on a hitch is what made the head
+   * lurch. So the step LENGTH is the only knob, and it has to hold still: a
+   * Verlet chain against stiff constraints buzzes if its step wanders, and
+   * gains energy if the step grows. Hence snapping to a standard refresh
+   * interval, with hysteresis so a display sitting between two rates cannot
+   * flip back and forth, and a 1/60 ceiling because that is what the wind
+   * constants were tuned against. A slow machine runs the plant slow, which
+   * reads as a calm day; running it with a longer step reads as a broken one.
+   */
+  updateSolveStep(dt) {
+    const clamped = Math.min(1 / 45, Math.max(1 / 240, dt));
+    this.frameAvg += (clamped - this.frameAvg) * 0.03;
+    for (const rung of REFRESH_LADDER) {
+      if (Math.abs(this.frameAvg - rung) < Math.abs(this.frameAvg - this.solveStep) * 0.80) {
+        this.solveStep = rung;
+      }
+    }
+  }
+
   updateGlobals(camera, state, dt) {
     const g = this.globals;
     const el = state.sunElevation, az = state.sunAzimuth;
@@ -674,7 +706,7 @@ export class Renderer {
     g.set([state.bloom, state.floretFront, state.exposure, dt], G.state);
     g.set([this.width, this.height, 1 / this.width, 1 / this.height], G.screen);
     g.set([HALF, FAR - NEAR, 0, 0.0016], G.shadowParam);
-    g.set([F.FLOWER.stemHeight, this.stemSegment, 1.0, state.debugView ?? 0], G.plant);
+    g.set([F.FLOWER.stemHeight, this.stemSegment, this.solveStep, state.debugView ?? 0], G.plant);
 
     const { A, B } = camera.depthParams;
     g.set([camera.near, camera.far, A, B], G.proj);
@@ -694,6 +726,7 @@ export class Renderer {
   render(camera, state, dt) {
     const { device } = this;
     this.resize();
+    this.updateSolveStep(dt);
     this.updateGlobals(camera, state, dt);
 
     const encoder = device.createCommandEncoder({ label: 'frame' });

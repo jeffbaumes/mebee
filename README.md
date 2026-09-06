@@ -128,6 +128,12 @@ executed**. Compensating for that, the parts that could be checked offline were:
   shaders against the bind group layouts in `renderer.js`.
 - The `Globals` uniform offsets in `renderer.js` are cross-checked field by
   field against the WGSL struct.
+- `tools/sim-stem.mjs` is a CPU port of the GPU stem solver -- same integrator,
+  constraints, ordering and constants -- which is how the wind timing was
+  settled: it reports the tip's per-frame movement under steady, jittery and
+  hitching frame times, for each candidate stepping policy. Run it after
+  touching `wind.wgsl`; the defaults are the shipped values, so a change there
+  without a matching change here makes the tool lie.
 - `tools/preview-leaf.mjs`, `preview-flower.mjs`, `preview-sky.mjs` render the
   venation, the flower geometry and the atmosphere to PNG via a small software
   rasteriser, so the procedural output was checked by eye.

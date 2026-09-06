@@ -17,7 +17,7 @@ struct Globals {
   state       : vec4f,   // bloom, floretFront, exposure, dt
   screen      : vec4f,   // w, h, 1/w, 1/h
   shadowParam : vec4f,   // orthoHalfWidth, depthRange, unused, bias
-  plant       : vec4f,   // stemLength, stemSegmentLength, flutterScale, unused
+  plant       : vec4f,   // stemLength, stemSegmentLength, solveStep, debugView
   proj        : vec4f,   // near, far, A, B  (ndcZ = A + B/viewDist)
   post        : vec4f,   // bloomStrength, grainAmount, chromatic, vignette
 }
