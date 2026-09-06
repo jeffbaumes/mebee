@@ -16,9 +16,10 @@ const CLIMB = 0.30;         // m/s added while boosting
 const SINK = 0.075;         // m/s of gentle settle with no input
 const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
 const HORIZ_LAG = 3.6;      // 1/s
-const TURN_RATE = 1.9;      // rad/s at full stick
-const PITCH_RATE = 1.1;     // rad/s at full stick
-const PITCH_LIMIT = 0.85;   // rad
+const TURN_RATE = 1.5;      // rad/s at full stick
+const PITCH_RATE = 0.85;    // rad/s at full stick
+const PITCH_LIMIT = 0.70;   // rad
+const PITCH_CENTRE = 1.4;   // 1/s that pitch returns to level when released
 const WALL_PUSH = 2.6;      // m/s^2 at the very edge of the cushion
 
 /** Exponential approach that is correct for any timestep. */
@@ -53,6 +54,12 @@ export class BeeFlight {
     this.yaw -= this.steer[0] * TURN_RATE * step;
     this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT,
       this.pitch - this.steer[1] * PITCH_RATE * step));
+    // Self-centring pitch. Without it a fractional stick offset leaves a
+    // permanent climb or dive that the player has to notice and correct, which
+    // is most of what makes a free-flight camera feel unmanageable.
+    if (Math.abs(this.steer[1]) < 0.08) {
+      this.pitch = approach(this.pitch, 0, PITCH_CENTRE, step);
+    }
 
     const fwd = this.forward();
     const v = this.velocity;

@@ -37,6 +37,7 @@ const PIPELINES = {
   'dof.wgsl':         ['bgl0', 'bglDof'],
   'bloom.wgsl':       ['bgl0', 'bglBloom'],
   'post.wgsl':        ['bgl0', 'bglPost'],
+  'grass.wgsl':       ['bgl0', 'bglGrass'],
 };
 
 // Parse the layouts straight out of renderer.js so the two cannot drift.
@@ -86,6 +87,7 @@ const STRUCT_EXPECT = {
   'FloretInstance': { file: 'floret.wgsl', jsFloats: 8, note: 'buildFloretInstances' },
   'StemNode':       { file: 'stem.wgsl',   jsFloats: 16, note: 'stem chain init' },
   'Mote':           { file: 'pollen_sim.wgsl', jsFloats: 8, note: 'pollen seeding' },
+  'GrassInstance':  { file: 'grass.wgsl', jsFloats: 8, note: 'buildGrassInstances' },
 };
 const FLOATS = { 'vec4f': 4, 'vec3f': 4, 'vec2f': 2, 'f32': 1, 'u32': 1, 'i32': 1 };
 for (const [name, want] of Object.entries(STRUCT_EXPECT)) {

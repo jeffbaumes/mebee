@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import { encodePNG } from './png.mjs';
 import { render } from './raster.mjs';
 import * as F from '../src/geom/flower.js';
+import { buildGrassBladeMesh, buildGrassInstances } from '../src/geom/grass.js';
+import { BOUNDS } from '../src/sim/flight.js';
 
 const W = Number(process.argv[3] || 720);
 const view = process.argv[4] || 'three-quarter';
@@ -44,12 +46,38 @@ for (let n = 0; n < inst.count; n++) {
   });
 }
 
+// Grass, transformed on the CPU so the field can be eyeballed before it ever
+// reaches a shader. Subsampled: the rasteriser is not built for 2000 meshes.
+if (process.env.GRASS !== '0') {
+  const blade = buildGrassBladeMesh();
+  const g = buildGrassInstances(BOUNDS);
+  const stride = Number(process.env.GRASS_STRIDE || 3);
+  for (let i = 0; i < g.count; i += stride) {
+    const o = i * 8;
+    const bx = g.data[o], bz = g.data[o + 2];
+    const h = g.data[o + 3], cs = g.data[o + 4], sn = g.data[o + 5], w = g.data[o + 6];
+    const tint = (g.data[o + 7] * 7.31) % 1;
+    meshes.push({
+      mesh: blade,
+      albedo: [0.055 + 0.05 * tint, 0.115 + 0.05 * tint, 0.028 + 0.014 * tint],
+      translucency: 0.9,
+      xform: (p) => {
+        const x = p[0] * h, y = p[1] * h, z = p[2] * w;
+        return [bx + x * cs - z * sn, y, bz + x * sn + z * cs];
+      },
+    });
+  }
+}
+
 const views = {
   'three-quarter': { eye: [0.075, headY + 0.048, 0.088], target: [0, headY - 0.004, 0], fov: 40 },
   'top':           { eye: [0.001, headY + 0.115, 0.004], target: [0, headY, 0], fov: 34 },
   'side':          { eye: [0.135, headY + 0.004, 0.012], target: [0, headY - 0.002, 0], fov: 36 },
   'wide':          { eye: [0.20, headY - 0.08, 0.26],  target: [0, headY - 0.15, 0], fov: 42 },
   'leaf':          { eye: [0.030, 0.360, 0.045], target: [0.043, 0.225, 0.030], fov: 46 },
+  // Roughly where the bee starts, with the flight-mode field of view.
+  'bee':           { eye: [0.26, 0.22, 0.30], target: [0, 0.20, 0], fov: 44 },
+  'lowgrass':      { eye: [0.16, 0.045, 0.20], target: [0, 0.09, 0], fov: 50 },
 };
 const v = views[view];
 const t0 = Date.now();

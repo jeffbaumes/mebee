@@ -9,6 +9,8 @@ import { createBuffer, makeMipGenerator, mipCount, makeShaderLoader } from '../g
 import { VERTEX_STRIDE } from '../geom/mesh.js';
 import * as F from '../geom/flower.js';
 import { growVenation, bakeLeafMaps } from '../geom/venation.js';
+import { buildGrassBladeMesh, buildGrassInstances } from '../geom/grass.js';
+import { BOUNDS } from '../sim/flight.js';
 import { projectSkySH, shToIrradiance } from './sky.js';
 import { mat4, lookAt, ortho, multiply, normalize } from './math.js';
 
@@ -82,6 +84,7 @@ export class Renderer {
       load('floret.wgsl'), load('pollen_sim.wgsl'), load('pollen_draw.wgsl'),
       load('dof.wgsl'), load('bloom.wgsl'), load('post.wgsl'),
     ]);
+    const grassSrc = await load('grass.wgsl');
     const mod = (code, label) => device.createShaderModule({ code, label });
     const M = {
       wind: mod(windSrc, 'wind'), sky: mod(skySrc, 'sky'), shadow: mod(shadowSrc, 'shadow'),
@@ -89,6 +92,7 @@ export class Renderer {
       pollenSim: mod(pollenSimSrc, 'pollenSim'),
       pollenDraw: mod(pollenDrawSrc, 'pollenDraw'), dof: mod(dofSrc, 'dof'),
       bloom: mod(bloomSrc, 'bloom'), post: mod(postSrc, 'post'),
+      grass: mod(grassSrc, 'grass'),
     };
 
     this.buildGeometry();
@@ -118,6 +122,13 @@ export class Renderer {
       leafB: upload(F.buildLeafMesh(0.066, 0.148, -2.05, 29), 'leafB'),
       floret: upload(F.buildDiscFloretMesh(), 'floret'),
     };
+
+    // Grass fills the play volume, so the flight bounds are the source of
+    // truth for where it goes -- no second copy of the world's extent.
+    this.parts.grass = upload(buildGrassBladeMesh(), 'grass');
+    const grass = buildGrassInstances(BOUNDS);
+    this.grassCount = grass.count;
+    this.grassBuffer = createBuffer(device, grass.data, GPUBufferUsage.STORAGE, 'grass');
 
     const inst = F.buildFloretInstances();
     this.floretCount = inst.count;
@@ -263,6 +274,10 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
     });
+    this.bglGrass = device.createBindGroupLayout({
+      label: 'grass',
+      entries: [{ binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } }],
+    });
     this.bglMaterial = device.createBindGroupLayout({
       label: 'material',
       entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } }],
@@ -345,6 +360,14 @@ export class Renderer {
         layout: pl(this.bgl0, this.bglPlant, this.bglMaterial),
         vertex: { module: M.plant, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
         fragment: { module: M.plant, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+        primitive: { topology: 'triangle-list' },
+        depthStencil: depthOn,
+      }),
+      grass: device.createRenderPipeline({
+        label: 'grass',
+        layout: pl(this.bgl0, this.bglGrass),
+        vertex: { module: M.grass, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
+        fragment: { module: M.grass, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
       }),
@@ -448,6 +471,10 @@ export class Renderer {
     this.bgStemOnly = device.createBindGroup({
       layout: this.bglStemOnly,
       entries: [{ binding: 0, resource: { buffer: this.stemBuffer } }],
+    });
+    this.bgGrass = device.createBindGroup({
+      layout: this.bglGrass,
+      entries: [{ binding: 0, resource: { buffer: this.grassBuffer } }],
     });
     this.bgFloret = device.createBindGroup({
       layout: this.bglFloret,
@@ -709,6 +736,14 @@ export class Renderer {
 
       pass.setPipeline(P.sky);
       pass.draw(3);
+
+      // Grass first: it is the backdrop, and drawing the near geometry after
+      // it lets early-z reject most of the sward behind the flower.
+      pass.setPipeline(P.grass);
+      pass.setBindGroup(1, this.bgGrass);
+      pass.setVertexBuffer(0, this.parts.grass.vertex);
+      pass.setIndexBuffer(this.parts.grass.index, this.parts.grass.indexFormat);
+      pass.drawIndexed(this.parts.grass.count, this.grassCount);
 
       pass.setPipeline(P.plant);
       pass.setBindGroup(1, this.bgPlant);
