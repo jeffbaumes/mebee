@@ -11,17 +11,19 @@ export const BOUNDS = {
   margin: 0.09,
 };
 
-const CRUISE = 0.060;       // m/s of forward drift, on the horizontal only
+const CRUISE_FWD = 0.075;   // m/s at full forward stick
+const CRUISE_BACK = 0.040;  // m/s at full back stick; backing off is slower
 const CLIMB = 0.160;        // m/s added while boosting
-const SINK = 0.045;         // m/s of gentle settle with no input
+const SINK = 0.045;         // m/s of gentle settle with no boost
 const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
 const HORIZ_LAG = 3.6;      // 1/s
 const TURN_RATE = 1.2;      // rad/s at full stick; a full circle in ~5s
-const PITCH_RATE = 0.85;    // rad/s at full stick -- view only, see update()
-// Wider than before: now that pitch is view-only it cannot get you into
-// trouble, so there is no reason not to let you look up at the flower.
-const PITCH_LIMIT = 0.95;   // rad, about 54 degrees
-const PITCH_CENTRE = 0.7;   // 1/s that the view drifts back to level
+// The view tilt is feedback, not a control: the camera noses up as the bee
+// climbs and down as it settles, which is how you read your own vertical
+// motion without an instrument.
+const VIEW_TILT = 1.1;      // rad per m/s of vertical velocity
+const VIEW_TILT_LIMIT = 0.22;
+const VIEW_TILT_LAG = 3.0;  // 1/s
 const WALL_PUSH = 2.6;      // m/s^2 at the very edge of the cushion
 
 /** Exponential approach that is correct for any timestep. */
@@ -37,9 +39,9 @@ export class BeeFlight {
     this.position = [0.26, 0.44, 0.30];
     // Face the flower head at the origin.
     this.yaw = Math.atan2(-this.position[0], -this.position[2]);
-    this.pitch = -0.05;
+    this.pitch = 0;                 // derived from climb rate, not steered
     this.velocity = [0, 0, 0];
-    // Stick deflection in [-1,1], set by the drag; zero when released.
+    // Stick deflection in [-1,1]: x turns, y is throttle (up = forward).
     this.steer = [0, 0];
     this.boost = 0;
   }
@@ -54,27 +56,20 @@ export class BeeFlight {
     const step = Math.min(0.05, Math.max(1 / 240, dt));
 
     this.yaw -= this.steer[0] * TURN_RATE * step;
-    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT,
-      this.pitch - this.steer[1] * PITCH_RATE * step));
-    // Self-centring pitch. Without it a fractional stick offset leaves a
-    // permanent climb or dive that the player has to notice and correct, which
-    // is most of what makes a free-flight camera feel unmanageable.
-    if (Math.abs(this.steer[1]) < 0.08) {
-      this.pitch = approach(this.pitch, 0, PITCH_CENTRE, step);
-    }
 
     const v = this.velocity;
 
-    // Heading drives travel; pitch does not. Looking up or down aims the
-    // camera and nothing else, so the two axes of the stick never fight: one
-    // turns you, the other only changes what you can see. Flying where you are
-    // looking sounds natural and is in practice the thing that makes a free
-    // camera hard to hold level.
+    // The stick is turn and throttle. There is no default drift, so releasing
+    // it leaves the bee hovering rather than committing it to a heading it has
+    // to be steered out of -- which is the whole reason a constant cruise is
+    // hard to fly at this scale.
+    const throttle = -this.steer[1];               // stick up is forward
+    const speed = throttle >= 0 ? throttle * CRUISE_FWD : throttle * CRUISE_BACK;
     const hx = Math.sin(this.yaw), hz = Math.cos(this.yaw);
     // Enough lag that a hard turn carries the bee wide rather than pivoting it
     // on the spot.
-    v[0] = approach(v[0], hx * CRUISE, HORIZ_LAG, step);
-    v[2] = approach(v[2], hz * CRUISE, HORIZ_LAG, step);
+    v[0] = approach(v[0], hx * speed, HORIZ_LAG, step);
+    v[2] = approach(v[2], hz * speed, HORIZ_LAG, step);
 
     // Altitude comes from the boost and gravity, nothing else. It is
     // deliberately the laggiest axis: press and the climb builds over about
@@ -82,6 +77,10 @@ export class BeeFlight {
     // the whole feel of a bee-suit hover.
     const targetVy = this.boost * CLIMB - SINK;
     v[1] = approach(v[1], targetVy, VERT_LAG, step);
+
+    const tilt = Math.max(-VIEW_TILT_LIMIT,
+      Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
+    this.pitch = approach(this.pitch, tilt, VIEW_TILT_LAG, step);
 
     for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
     this.applyBounds(step);
