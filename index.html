@@ -8,6 +8,11 @@
 <style>
   :root { color-scheme: dark; --panel: rgba(14,16,18,0.82); --line: rgba(255,255,255,0.13); }
   * { box-sizing: border-box; }
+  /* The UA rule for this is `[hidden] { display: none }` -- specificity (0,1,0)
+     -- which every `#id { display: ... }` below silently outranks. Without the
+     !important, setting `.hidden` on the overlays does nothing and they sit
+     opaque over the canvas forever. */
+  [hidden] { display: none !important; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0d0f;
     font: 13px/1.45 ui-sans-serif, system-ui, -apple-system, sans-serif; color: #e8e6e3; }
   #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
@@ -19,6 +24,9 @@
   #build { position: absolute; bottom: 8px; left: 12px; font-size: 10px;
     color: #6b7176; text-shadow: 0 1px 3px #000; font-variant-numeric: tabular-nums; }
 
+  /* On a phone a 244px panel covers most of the frame, so start collapsed and
+     let the header toggle it. */
+  @media (max-width: 560px) { #panel:not(.expanded) .rows { display: none; } }
   #panel { position: absolute; top: 8px; right: 8px; width: 244px; max-height: calc(100% - 16px);
     overflow-y: auto; background: var(--panel); backdrop-filter: blur(14px);
     border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px 12px;
@@ -43,7 +51,9 @@
     white-space: pre-wrap; word-break: break-all; }
 
   #loading, #error { position: absolute; inset: 0; display: grid; place-content: center;
-    text-align: center; gap: 8px; padding: 24px; pointer-events: auto; background: #0b0d0f; }
+    text-align: center; gap: 8px; padding: 24px; pointer-events: auto;
+    background: #0b0d0f; color: #e8e6e3; }
+  #loading p { margin: 0; color: #9aa0a6; font-size: 12.5px; }
   #error h2 { margin: 0; font-size: 15px; color: #f0b0b0; font-weight: 600; }
   #error p { margin: 0; max-width: 34rem; color: #9aa0a6; font-size: 12.5px; }
   .spin { width: 22px; height: 22px; border: 2px solid #333; border-top-color: #d98cae;
@@ -59,7 +69,7 @@
   <div id="build"></div>
 
   <div id="panel">
-    <header>Flower <button id="panel-toggle" title="Collapse">-</button></header>
+    <header>Flower <button id="panel-toggle" title="Show or hide controls">≡</button></header>
     <div class="rows">
 
       <div class="group">Light &amp; air</div>

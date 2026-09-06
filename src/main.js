@@ -4,6 +4,13 @@ import { initWebGPU } from './gpu/device.js';
 import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
 
+// Anything that throws outside boot()'s own try/catch -- a listener, a late
+// rejection -- would otherwise just leave the loading overlay up forever with
+// no indication of why.
+window.addEventListener('error', (e) => reportFatal(e.message, e.filename ? `${e.filename}:${e.lineno}` : ''));
+window.addEventListener('unhandledrejection', (e) =>
+  reportFatal(e.reason?.message ?? String(e.reason), 'unhandled rejection'));
+
 const canvas = document.getElementById('view');
 const hud = document.getElementById('hud');
 const fpsEl = document.getElementById('fps');
@@ -33,8 +40,16 @@ const state = {
 
 const camera = new MacroCamera();
 
+let fatalReported = false;
+function reportFatal(message, detail) {
+  if (fatalReported) return;
+  fatalReported = true;
+  fail(message, detail);
+}
+
 function fail(message, detail) {
   hud.hidden = true;
+  document.getElementById('loading').hidden = true;
   document.getElementById('error').hidden = false;
   document.getElementById('error-msg').textContent = message;
   document.getElementById('error-detail').textContent = detail || '';
@@ -108,7 +123,9 @@ function bindControls() {
     state.animate = e.target.checked;
   });
   document.getElementById('panel-toggle').addEventListener('click', () => {
-    document.getElementById('panel').classList.toggle('collapsed');
+    const panel = document.getElementById('panel');
+    panel.classList.toggle('collapsed');
+    panel.classList.toggle('expanded');
   });
   document.getElementById('debugView').addEventListener('change', (e) => {
     state.debugView = parseInt(e.target.value, 10) || 0;
@@ -134,8 +151,17 @@ function resizeCanvas() {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
+  const stage = (text) => {
+    const p = document.querySelector('#loading p');
+    if (p) p.textContent = text;
+    // Let the browser paint before the next synchronous burst; the leaf bake
+    // alone blocks for the better part of a second on a phone.
+    return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+  };
+
   let renderer;
   try {
+    await stage('Compiling shaders and growing the flower…');
     // Uncaptured GPU errors are otherwise silent: the frame just goes black.
     gpu.device.pushErrorScope('validation');
     renderer = await Renderer.create(gpu.device, gpu.context, gpu.format, canvas);
