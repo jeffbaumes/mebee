@@ -15,10 +15,13 @@
     "preview:leaf": "node tools/preview-leaf.mjs /tmp/leaf.png 640",
     "preview:flower": "node tools/preview-flower.mjs /tmp/flower.png 720 three-quarter",
     "preview:sky": "node tools/preview-sky.mjs /tmp/sky.png",
+    "dev": "vite",
     "serve": "http-server . -p 8080"
   },
   "devDependencies": {
+    "http-server": "^14.1.1",
     "naga-wasi-cli": "^0.1.0",
+    "vite": "^8.2.2",
     "wgsl_reflect": "^1.5.0"
   }
 }

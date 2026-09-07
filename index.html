@@ -245,8 +245,12 @@
 
 <!-- BUILD is rewritten to the commit sha when the site is staged for
      deployment. It cache-busts the entry script and every shader fetch, and
-     is shown in the HUD so a stale bundle is visible rather than mysterious. -->
+     is shown in the HUD so a stale bundle is visible rather than mysterious.
+     The query key is `build`, not `v`: Vite's dev server special-cases any
+     `?v=` request as one of its own immutable, cache-forever module IDs, so a
+     literal `v` here made the dev server cache main.js for a year and quietly
+     ignore every edit. -->
 <script>window.__BUILD__ = "dev";</script>
-<script type="module" src="./src/main.js?v=dev"></script>
+<script type="module" src="./src/main.js?build=dev"></script>
 </body>
 </html>

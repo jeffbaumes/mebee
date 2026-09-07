@@ -24,6 +24,16 @@ export async function initWebGPU(canvas) {
   return { adapter, device, context, format };
 }
 
+// A plain string, not a literal inlined at the call site below: Vite's dev
+// server pattern-matches `new URL('literal', import.meta.url)` and rewrites
+// it as a single fingerprinted build asset, which drops the trailing slash a
+// directory prefix needs (`src/shaders` instead of `src/shaders/`, breaking
+// every fetch beneath it). This loader fetches a whole directory of files
+// chosen at runtime, not one static asset, so it deliberately isn't that
+// pattern -- routing the path through a variable is what keeps Vite from
+// "helping".
+const SHADERS_DIR = '../shaders/';
+
 /**
  * Resolve `//!include` directives at load time; mirrors tools/check-shaders.
  *
@@ -32,13 +42,14 @@ export async function initWebGPU(canvas) {
  * so a document-relative default breaks as soon as the site is served from a
  * subpath (GitHub Pages project sites) or the page sets a <base>.
  */
-export async function makeShaderLoader(base = new URL('../shaders/', import.meta.url).href) {
+export async function makeShaderLoader(base = new URL(SHADERS_DIR, import.meta.url).href) {
   const cache = new Map();
   // Cache-bust with the build stamp: GitHub Pages serves assets with a ten
   // minute max-age, so without this a fresh deploy can be served alongside
-  // shaders from the previous one.
+  // shaders from the previous one. The query key is `build`, not `v` -- see
+  // index.html's own script tag for why.
   const version = globalThis.__BUILD__ && globalThis.__BUILD__ !== 'dev'
-    ? `?v=${globalThis.__BUILD__}` : '';
+    ? `?build=${globalThis.__BUILD__}` : '';
   const fetchOnce = (name) => {
     if (!cache.has(name)) {
       cache.set(name, fetch(base + name + version).then((r) => {
