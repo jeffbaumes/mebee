@@ -9,7 +9,10 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   server: {
-    port: 5173,
+    // PORT when the harness assigns one, so two sessions can serve this tree
+    // at once; 5173 when run by hand. strictPort stays off so a hand-run
+    // server steps aside rather than failing if 5173 is already taken.
+    port: Number(process.env.PORT) || 5173,
     strictPort: false,
   },
   clearScreen: false,
