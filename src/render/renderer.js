@@ -285,6 +285,32 @@ export class Renderer {
     this.landingFree = [0, 1, 2];
     this.sites = new HeadSites(this.plantCount);
     this.sites.count = 0;
+    // Landing-readback bookkeeping.
+    //
+    // In orbit mode the camera TARGET is read straight out of `sites`, and the
+    // bee's whole flight model reads it too -- so how often the table actually
+    // advances is a visible quantity, not an implementation detail. It is
+    // measured rather than assumed, because assuming "a couple of frames late"
+    // is what hid a much larger stall: see `?trace=head` and window.__headStats.
+    //
+    //   frameId          frames rendered
+    //   sitesFrame       the frame the table now in `sites` was published on
+    //   landingCopyFrame the frame each in-flight staging slot was copied on
+    //   landingCopies    readbacks requested
+    //   landingLands     readbacks that came back
+    //   landingSkips     frames that requested nothing because all three
+    //                    staging slots were still in flight -- the table
+    //                    cannot advance on such a frame, and the camera
+    //                    spends it on a stale head
+    //   landingMapMs     latency of the most recent map
+    this.frameId = 0;
+    this.sitesFrame = -1;
+    this.landingCopyFrame = [-1, -1, -1];
+    this.landingCopies = 0;
+    this.landingLands = 0;
+    this.landingSkips = 0;
+    this.landingFails = 0;
+    this.landingMapMs = 0;
 
     // Stem solver step. Exactly one step runs per frame; this is how long it
     // is. See updateSolveStep, and tools/sim-stem.mjs for the measurements.
@@ -884,6 +910,7 @@ export class Renderer {
 
   render(camera, state, dt) {
     const { device } = this;
+    this.frameId++;
     this.resize();
     this.updateSolveStep(dt);
     this.updateGlobals(camera, state);
@@ -1052,21 +1079,33 @@ export class Renderer {
     if (slot !== undefined) {
       encoder.copyBufferToBuffer(this.landingBuffer, 0,
         this.landingStaging[slot], 0, this.landingBytes);
+      this.landingCopyFrame[slot] = this.frameId;
+      this.landingCopies++;
+    } else {
+      this.landingSkips++;
     }
 
     device.queue.submit([encoder.finish()]);
 
     if (slot !== undefined) {
       const buf = this.landingStaging[slot];
+      const t0 = performance.now();
       buf.mapAsync(GPUMapMode.READ).then(() => {
+        this.landingMapMs = performance.now() - t0;
+        this.landingLands++;
         // Copy out: the mapped range is invalidated by unmap, and the flight
         // model reads this table for the rest of the frame.
         this.sites.data.set(new Float32Array(buf.getMappedRange(),
                                              0, this.plantCount * SITE_FLOATS));
         this.sites.count = this.plantCount;
+        this.sitesFrame = this.landingCopyFrame[slot];
         buf.unmap();
         this.landingFree.push(slot);
-      }).catch(() => { this.landingFree.push(slot); });
+      }).catch((e) => {
+        this.landingFails++;
+        this.landingLastError = String(e?.message ?? e);
+        this.landingFree.push(slot);
+      });
     }
   }
 

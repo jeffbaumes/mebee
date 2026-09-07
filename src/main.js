@@ -470,6 +470,74 @@ function resizeCanvas() {
   let last = performance.now();
   let frames = 0, fpsClock = last;
 
+  // --- head-position trace ------------------------------------------------
+  // `?trace=head` records the hero head's published position every frame and
+  // dumps it through window.__headStats().
+  //
+  // Jitter you can see is a large frame-to-frame CHANGE in how far the head
+  // moved, and there are two quite different ways to get one. The solver can
+  // genuinely lurch -- which is what a raced constraint pass was doing, see
+  // the bend loop in wind.wgsl. Or the head can be moving perfectly smoothly
+  // while the CAMERA reads it from a table that does not advance every frame:
+  // `sites` comes back from the GPU asynchronously, and measuring it is the
+  // point of the readback counters here, because guessing "a couple of frames
+  // late" turned out to understate it badly. Separating those two is what
+  // this trace is for; `stepMm` is the motion as the camera sees it, and
+  // `tableAdvancedOnPct` says how much of that is the readback rather than
+  // the plant.
+  //
+  // Everything here is off unless asked for, and the array is capped so a long
+  // session cannot grow without bound.
+  const traceHead = new URLSearchParams(location.search).get('trace') === 'head';
+  const headTrace = [];
+  const headStats = () => {
+    const s = headTrace.slice(60);
+    if (s.length < 8) return 'not enough frames';
+    const q = (a, p) => a.slice().sort((x, y) => x - y)[Math.floor((a.length - 1) * p)];
+    const step = [];
+    for (let i = 1; i < s.length; i++) {
+      step.push(1000 * Math.hypot(s[i].x - s[i - 1].x, s[i].y - s[i - 1].y, s[i].z - s[i - 1].z));
+    }
+    const jerk = [];
+    for (let i = 1; i < step.length; i++) jerk.push(Math.abs(step[i] - step[i - 1]));
+
+    // How the published table actually advances. A frame on which it did not
+    // advance is a frame the camera spent on a stale head; the frame that
+    // finally lands then has to cover everything that happened in between,
+    // and THAT is the jump. `held` is how long each stale run lasted.
+    const held = [];
+    const jumpMm = [];
+    let run = 0;
+    for (let i = 1; i < s.length; i++) {
+      if (s[i].sitesFrame === s[i - 1].sitesFrame) { run++; continue; }
+      held.push(run + 1);
+      jumpMm.push(step[i - 1]);
+      run = 0;
+    }
+    const r = renderer;
+    return {
+      frames: s.length,
+      // Motion of the head as the CAMERA sees it, which is the published
+      // table -- not the motion the solver actually produced.
+      stepMm: { mean: +(step.reduce((a, b) => a + b, 0) / step.length).toFixed(3),
+                p50: +q(step, 0.5).toFixed(3), p99: +q(step, 0.99).toFixed(3),
+                max: +Math.max(...step).toFixed(3) },
+      jerkMm: { p50: +q(jerk, 0.5).toFixed(3), p99: +q(jerk, 0.99).toFixed(3),
+                max: +Math.max(...jerk).toFixed(3) },
+      tableAdvancedOnPct: +(100 * held.length / s.length).toFixed(1),
+      heldFrames: held.length ? { p50: q(held, 0.5), p99: q(held, 0.99), max: Math.max(...held) } : null,
+      jumpOnAdvanceMm: jumpMm.length
+        ? { p50: +q(jumpMm, 0.5).toFixed(2), max: +Math.max(...jumpMm).toFixed(2) } : null,
+      readback: { copies: r.landingCopies, lands: r.landingLands, skips: r.landingSkips,
+                  fails: r.landingFails, lastMapMs: +r.landingMapMs.toFixed(1) },
+    };
+  };
+  if (traceHead) {
+    window.__headTrace = headTrace;
+    window.__headStats = headStats;
+    window.__renderer = renderer;
+  }
+
   function frame(now) {
     const dt = Math.min(0.05, (now - last) / 1000);
     last = now;
@@ -513,6 +581,14 @@ function resizeCanvas() {
       // not drift out of frame on a gusty day.
       renderer.headPosition(heroPlant, heroTarget);
       state.pinnedPlant = heroPlant;
+    }
+    if (traceHead && headTrace.length < 20000) {
+      headTrace.push({
+        frame: renderer.frameId, dt,
+        x: heroTarget[0], y: heroTarget[1], z: heroTarget[2],
+        sitesFrame: renderer.sitesFrame,
+        age: renderer.frameId - renderer.sitesFrame,
+      });
     }
     camera.update(canvas.width / canvas.height);
     renderer.render(camera, state, dt);
