@@ -112,16 +112,34 @@ fn solveStem(@builtin(local_invocation_id) lid: vec3u,
     // segment with the rest pose, so the stem remembers being upright rather
     // than merely remembering being straight -- a straight stem lying flat
     // satisfies a pure straightness constraint perfectly well.
-    if (i >= 2u) {
-      let a = wsPos[i - 2u];
-      let b = wsPos[i - 1u];
-      let d = b - a;
-      let cont = d / max(1e-6, length(d));
-      let mixed = mix(cont, restAxis, 0.10);
-      let straight = b + normalize(mixed) * segLen;
-      wsPos[i] = mix(wsPos[i], straight, 0.28);
+    //
+    // THREE colours, not one pass. This constraint reads i-1 AND i-2, so the
+    // red/black split the distance constraint uses above is not enough here:
+    // i and i-2 share a parity. Written as a single unguarded pass, every
+    // thread read two slots its neighbours were writing at that same instant
+    // -- a data race, and one that did not announce itself, because all
+    // sixteen threads sit in one SIMD group and so every read saw the
+    // pre-pass value. That is Jacobi, and Jacobi converges far more slowly
+    // than the sequential sweep this was written as: measured in
+    // tools/sim-stem.mjs, 3.7x the frame-to-frame jerk at the tip and 2.6x
+    // the high-frequency content, which is the buzz you could see in a gust.
+    //
+    // With i % 3 the two parents are always the OTHER two colours, so no
+    // thread reads a slot another thread is writing, and colours 1 and 2 see
+    // the updates colour 0 just made -- race-free, and it still propagates
+    // down the chain the way the sequential version does.
+    for (var colour = 0u; colour < 3u; colour++) {
+      if (i >= 2u && (i % 3u) == colour) {
+        let a = wsPos[i - 2u];
+        let b = wsPos[i - 1u];
+        let d = b - a;
+        let cont = d / max(1e-6, length(d));
+        let mixed = mix(cont, restAxis, 0.10);
+        let straight = b + normalize(mixed) * segLen;
+        wsPos[i] = mix(wsPos[i], straight, 0.28);
+      }
+      workgroupBarrier();
     }
-    workgroupBarrier();
   }
 
   pos = wsPos[i];

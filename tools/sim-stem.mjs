@@ -213,17 +213,27 @@ export function simulate(opts = {}) {
             pos[i] = a.map((v, k) => v + d[k] * (segLen / l));
           }
         }
-        for (let i = 2; i < STEM_NODES; i++) {
-          const a = pos[i - 2], b = pos[i - 1];
-          const dv = b.map((v, k) => v - a[k]);
-          const l = Math.max(1e-6, Math.hypot(...dv));
-          // The bend target blends the parent's continuation with the rest
-          // pose, so the stem remembers being upright, not merely straight.
-          const cont = dv.map((v) => v / l);
-          const mixed = cont.map((v, k) => v * (1 - restBias) + restAxis[k] * restBias);
-          const ml = Math.max(1e-6, Math.hypot(...mixed));
-          const target = b.map((v, k) => v + (mixed[k] / ml) * segLen);
-          pos[i] = pos[i].map((v, k) => v + (target[k] - v) * bend);
+        // Bending, in the shader's THREE colours. This used to be a plain
+        // sequential sweep, which is a solver the GPU cannot run and never
+        // did: the shader's version had every thread read i-1 and i-2 while
+        // its neighbours wrote them, which resolved to Jacobi and converged
+        // far worse. This tool reporting the sequential sweep is exactly why
+        // that went unnoticed -- it said the field was stable while the
+        // screen buzzed. Mirror the colouring, or this lies again.
+        for (let colour = 0; colour < 3; colour++) {
+          for (let i = 2; i < STEM_NODES; i++) {
+            if (i % 3 !== colour) continue;
+            const a = pos[i - 2], b = pos[i - 1];
+            const dv = b.map((v, k) => v - a[k]);
+            const l = Math.max(1e-6, Math.hypot(...dv));
+            // The bend target blends the parent's continuation with the rest
+            // pose, so the stem remembers being upright, not merely straight.
+            const cont = dv.map((v) => v / l);
+            const mixed = cont.map((v, k) => v * (1 - restBias) + restAxis[k] * restBias);
+            const ml = Math.max(1e-6, Math.hypot(...mixed));
+            const target = b.map((v, k) => v + (mixed[k] / ml) * segLen);
+            pos[i] = pos[i].map((v, k) => v + (target[k] - v) * bend);
+          }
         }
       }
     }
