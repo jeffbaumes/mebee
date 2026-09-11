@@ -10,6 +10,12 @@ import { FLOWER } from '../src/geom/flower.js';
 const cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
 const dot = (a, b) => a[0]*b[0] + a[1]*b[1] + a[2]*b[2];
 const norm = (a) => { const l = Math.hypot(...a) || 1; return a.map((v) => v / l); };
+// The aim is stored as a direction (bee.lookDir, read via forward()), not as
+// yaw/pitch angles -- see the gimbal-lock note on BeeFlight.look(). Every bee
+// below stays in fly mode, where up is world Y throughout, so recovering an
+// equivalent yaw/pitch from the direction is exact.
+const pitchOf = (v) => Math.asin(Math.max(-1, Math.min(1, v[1])));
+const yawOf = (v) => Math.atan2(v[0], v[2]);
 
 let failures = 0;
 const check = (name, ok, detail = '') => {
@@ -111,13 +117,13 @@ console.log('\nA/D do nothing while flying:');
     const bee = new BeeFlight();
     bee.steer = primeSteer;
     for (let i = 0; i < 90; i++) bee.update(1 / 60, flat);
-    const yaw0 = bee.yaw, pitch0 = bee.pitch;
+    const aim0 = bee.forward().slice();
     const facing0 = bee.facing.slice();
     bee.steer = [1, primeSteer[1]];
     for (let i = 0; i < 120; i++) bee.update(1 / 60, flat);
     check(`A/D ${name} leaves the aim exactly where it was`,
-      bee.yaw === yaw0 && bee.pitch === pitch0,
-      `yaw moved ${(bee.yaw - yaw0).toFixed(6)}, pitch moved ${(bee.pitch - pitch0).toFixed(6)}`);
+      dot(bee.forward(), aim0) > 0.999999999,
+      `dot ${dot(bee.forward(), aim0).toFixed(9)}`);
     check(`  and the facing with it`, dot(norm(bee.facing), norm(facing0)) > 0.999999,
       `dot ${dot(norm(bee.facing), norm(facing0)).toFixed(6)}`);
   }
@@ -129,24 +135,91 @@ console.log('\nA/D do nothing while flying:');
 console.log('\nthe look moves the way it is asked and no further:');
 {
   const bee = new BeeFlight();
-  const rest = bee.pitch;
+  const rest = pitchOf(bee.forward());
   bee.look(0, 0.5);
-  check('a positive pitch delta looks up', bee.pitch > rest + 0.49,
-    `pitch ${bee.pitch.toFixed(3)}`);
+  check('a positive pitch delta looks up', pitchOf(bee.forward()) > rest + 0.49,
+    `pitch ${pitchOf(bee.forward()).toFixed(3)}`);
   bee.look(0, -1.0);
-  check('and a negative one looks down', bee.pitch < rest - 0.49,
-    `pitch ${bee.pitch.toFixed(3)}`);
+  check('and a negative one looks down', pitchOf(bee.forward()) < rest - 0.49,
+    `pitch ${pitchOf(bee.forward()).toFixed(3)}`);
   // The flying camera's up is world up, so a look straight down it has no
   // defined roll: the cap has to hold however hard it is pushed.
   let ok = true;
   for (const d of [1, -1]) {
     for (let i = 0; i < 400; i++) {
       bee.look(0.1 * d, 0.1 * d);
-      if (!Number.isFinite(bee.pitch) || Math.abs(bee.pitch) > Math.PI / 2 - 0.05) ok = false;
+      const p = pitchOf(bee.forward());
+      if (!Number.isFinite(p) || Math.abs(p) > Math.PI / 2 - 0.05) ok = false;
     }
   }
   check('and stops short of straight up and straight down', ok,
     `|pitch| held under ${(Math.PI / 2 - 0.05).toFixed(2)}`);
+}
+
+// A single look() call carries a whole gesture's delta, not one pixel's --
+// a fast trackpad swipe or a big mouse-drag callback hands over a large
+// dPitch in one call. Rotating the aim by that much in one step could carry
+// it past the pole and out the other side, which the elevation clamp then
+// caught -- but on a bearing already flipped, reading as the view facing
+// backwards for exactly one frame before the next, smaller input corrected
+// it. That is the flip look() itself has to absorb, not just the steady-hand
+// case above.
+console.log('\na single large look() delta saturates instead of flipping through the pole:');
+{
+  const bee = new BeeFlight();
+  bee.look(0, 0.6);                        // look up a bit, off centre in yaw too
+  bee.look(0.3, 0);
+  const before = bee.forward().slice();
+  bee.look(0, -2.7);                       // one big downward swipe, > pi/2
+  const after = bee.forward().slice();
+  // Saturating rather than flipping means the bearing (yaw) barely moves even
+  // though the delta was huge -- a flip through the pole reverses it instead.
+  const bearingShift = Math.acos(Math.max(-1, Math.min(1,
+    dot(norm([before[0], 0, before[2]]), norm([after[0], 0, after[2]])))));
+  check('one large downward swipe holds the bearing, does not reverse it',
+    bearingShift < 0.5, `bearing moved ${bearingShift.toFixed(3)} rad`);
+  check('  and lands at the pitch limit, not past it',
+    pitchOf(after) < -1.3, `pitch ${pitchOf(after).toFixed(3)}`);
+  // And the same swipe split across many small calls -- a steady drag rather
+  // than one big callback -- has to land in the same place.
+  const bee2 = new BeeFlight();
+  bee2.look(0, 0.6);
+  bee2.look(0.3, 0);
+  for (let i = 0; i < 270; i++) bee2.look(0, -0.01);
+  check('  matching what the same total delta does in small steps',
+    dot(after, bee2.forward()) > 0.999,
+    `dot ${dot(after, bee2.forward()).toFixed(6)}`);
+}
+
+// Crawling near the rim, the surface normal leans up to ~46 degrees off
+// vertical (see CRAWL_MIN_ELEVATION) -- nothing like world Y. Clamping the
+// look against world Y regardless (the old PITCH_LIMIT) left the flower's own
+// "straight up" well inside the reachable view, and swinging the aim through
+// it read as gimbal lock -- the same yaw-sensitivity spike as any FPS camera
+// looking straight up, except the pole a crawl could hit was wherever the
+// flower happened to lean rather than one PITCH_LIMIT had already fenced off.
+console.log("\ncrawling, the look is capped against the flower's own pole, not world Y's:");
+{
+  const bee = new BeeFlight();
+  bee.mode = 'crawl';
+  bee.plant = 0;
+  bee.surfaceDir = norm([0.9, 0.35, 0.2]);   // near the rim, well off vertical
+  const sites = flat;
+  const maxSin = Math.sin(1.35) + 1e-6;      // PITCH_LIMIT, mirrored here
+  let ok = true, worst = 0;
+  for (const d of [1, -1]) {
+    for (let i = 0; i < 400; i++) {
+      bee.look(0.1 * d, 0.1 * d, sites);
+      const f = bee.forward();
+      const up = bee.upVector(sites);
+      if (!f.every(Number.isFinite)) { ok = false; break; }
+      const s = Math.abs(dot(f, up));
+      worst = Math.max(worst, s);
+      if (s > maxSin) ok = false;
+    }
+  }
+  check("stays off the flower's pole however hard the look is pushed", ok,
+    `|dot(aim, surface up)| held under ${maxSin.toFixed(3)}, worst ${worst.toFixed(3)}`);
 }
 
 // There is no gravity any more: nothing held holds still rather than sinking,
@@ -273,6 +346,65 @@ for (const [name, p] of [
     `elevation sin ${bee.surfaceDir[1].toFixed(3)}`);
 }
 
+// A bee diving to land is looking about as far down as flying allows -- aim
+// clamped to PITCH_LIMIT off world Y, the up in play right up to the instant
+// of touchdown. The flower it lands on can lean up to ~46 degrees off world Y
+// of its own accord, so the SAME stored aim can end up much closer to the
+// landing site's own pole than it ever was to world Y's -- with no pointer
+// motion in between to give look() a chance to re-clamp it. That gap is what
+// reclampLook() (called from land()'s caller, update()) exists to close; this
+// reproduces it directly against land() to check the invariant, not just the
+// feel of it.
+console.log("\nlanding while looking down never leaves the aim against the landing site's own pole:");
+{
+  const pitchVal = -1.35, yawVal = -Math.PI / 2;   // as far down as flying allows
+  const cp = Math.cos(pitchVal);
+  const diveLook = [Math.sin(yawVal) * cp, Math.sin(pitchVal), Math.cos(yawVal) * cp];
+  const maxSin = Math.sin(1.35) + 1e-6;            // PITCH_LIMIT, mirrored here
+  // This tilt is chosen adversarially -- see check above: dot(diveLook, up)
+  // goes from -0.976 at tilt 0 to -0.997 at tilt 0.3, which is what a bee
+  // landing with this exact aim and no reclamp used to end up with.
+  const sites = headSites(0.3);
+  const bee = new BeeFlight();
+  bee.lookDir = diveLook.slice();
+  bee.position = [0, FLOWER.stemHeight + 0.020, 0];
+  bee.land(sites.frame(0));
+  bee.reclampLook(sites);
+  const f = bee.forward(), up = bee.upVector(sites);
+  check('aim stays off the new up\'s pole', Math.abs(dot(f, up)) <= maxSin,
+    `|dot(aim, up)| ${Math.abs(dot(f, up)).toFixed(4)}, limit ${maxSin.toFixed(4)}`);
+}
+
+// The same gap, without ever landing: a flower already stood on sways on its
+// own (wind.wgsl), so "up" keeps moving every frame with no pointer motion at
+// all. update() has to reclamp on every tick it runs, not just the ticks a
+// look() happens to land on, or a still mouse over a gusty flower would drift
+// the aim onto the pole exactly the same way landing did above.
+console.log('\ncrawling, a swaying flower cannot walk the aim onto its own pole either:');
+{
+  const bee = new BeeFlight();
+  bee.mode = 'crawl';
+  bee.plant = 0;
+  bee.surfaceDir = [0, 1, 0];
+  const pitchVal = -1.35, yawVal = -Math.PI / 2;
+  const cp = Math.cos(pitchVal);
+  bee.lookDir = [Math.sin(yawVal) * cp, Math.sin(pitchVal), Math.cos(yawVal) * cp];
+  const maxSin = Math.sin(1.35) + 1e-6;
+  let ok = true, worst = 0;
+  for (let i = 0; i <= 60; i++) {
+    const tilt = 0.3 * Math.sin(i / 10);   // the flower sways back and forth
+    const sites = headSites(tilt);
+    bee.update(1 / 600, sites);            // a tiny step, to isolate the sway from the walk
+    const f = bee.forward(), up = bee.upVector(sites);
+    if (!f.every(Number.isFinite)) { ok = false; break; }
+    const s = Math.abs(dot(f, up));
+    worst = Math.max(worst, s);
+    if (s > maxSin) ok = false;
+  }
+  check('stays off the pole as the head sways, with no pointer input at all', ok,
+    `|dot(aim, up)| held under ${maxSin.toFixed(3)}, worst ${worst.toFixed(3)}`);
+}
+
 console.log('\nfree flight stays finite and inside the play volume:');
 {
   const bee = new BeeFlight();
@@ -283,8 +415,8 @@ console.log('\nfree flight stays finite and inside the play volume:');
     if (s % 200 === 0) bee.look(0.3, 0.15);
     bee.update(1 / 60, flat);
     const p = bee.position;
-    if (!p.every(Number.isFinite) || !Number.isFinite(bee.pitch) ||
-        !Number.isFinite(bee.yaw) || !Number.isFinite(bee.throttle) ||
+    if (!p.every(Number.isFinite) || !bee.forward().every(Number.isFinite) ||
+        !Number.isFinite(bee.throttle) ||
         !bee.facing.every(Number.isFinite)) { ok = false; break; }
     for (let a = 0; a < 3; a++) {
       if (p[a] < BOUNDS.min[a] - 1e-6 || p[a] > BOUNDS.max[a] + 1e-6) { ok = false; }
@@ -321,6 +453,53 @@ for (const [name, radius] of [['a common daisy', 0.011], ['an ox-eye', 0.028],
   far.velocity = [0, 0, 0];
   far.update(1 / 60, sites);
   check(`  ignores ${name} from ${(radius * 4000).toFixed(0)}mm out`, far.mode === 'fly');
+}
+
+// The lean is a damped spring on top of the drawn mesh only -- see
+// visualState and SWAY_*. Nothing here may leak into the actual flight
+// model: a bank that nudged the aim or the velocity would be a physics bug
+// wearing a cosmetic one's name.
+console.log('\nthe g-force lean banks into a turn, settles back, and never touches the flight itself:');
+{
+  const bee = new BeeFlight();
+  bee.steer = [0, -1];                       // build a cruise
+  for (let i = 0; i < 120; i++) bee.update(1 / 60, flat);
+  bee.look(1.3, 0, flat);                    // swing the aim hard -- a turn
+  let peak = 0, aimAtPeak = null, visAtPeak = null;
+  for (let i = 0; i < 30; i++) {
+    bee.update(1 / 60, flat);
+    if (Math.abs(bee.swayRoll) > peak) {
+      peak = Math.abs(bee.swayRoll);
+      aimAtPeak = bee.forward().slice();
+      visAtPeak = bee.visualState(flat).forward;
+    }
+  }
+  check('a hard turn banks the model', peak > 0.05, `peak roll ${peak.toFixed(3)} rad`);
+  check('  never past the clamp', peak <= 0.30 + 1e-6, `peak roll ${peak.toFixed(3)} rad`);
+  check('  while the model banks, the aim itself stays exactly what look() set',
+    dot(aimAtPeak, visAtPeak) < 0.9999999,
+    `dot(aim, drawn model) ${dot(aimAtPeak, visAtPeak).toFixed(6)}`);
+
+  bee.steer = [0, -1];                       // hold straight again
+  for (let i = 0; i < 180; i++) bee.update(1 / 60, flat);
+  check('  and settles back near level once the turn is over',
+    Math.abs(bee.swayRoll) < 0.01, `roll ${bee.swayRoll.toFixed(4)} rad after 3s straight`);
+
+  // Same look() swing and cruise, run again but ask visualState for the
+  // cosmetic basis at every step -- position, velocity, and the aim must land
+  // in exactly the same place either way, or the "cosmetic" lean would not be.
+  const twin = new BeeFlight();
+  twin.steer = [0, -1];
+  for (let i = 0; i < 120; i++) twin.update(1 / 60, flat);
+  twin.look(1.3, 0, flat);
+  for (let i = 0; i < 30; i++) { twin.update(1 / 60, flat); twin.visualState(flat); }
+  twin.steer = [0, -1];
+  for (let i = 0; i < 180; i++) { twin.update(1 / 60, flat); twin.visualState(flat); }
+  check('reading the cosmetic lean changes nothing about the flight',
+    bee.position.every((v, i) => v === twin.position[i]) &&
+    bee.velocity.every((v, i) => v === twin.velocity[i]) &&
+    dot(bee.forward(), twin.forward()) > 0.999999999,
+    `pos equal ${JSON.stringify(bee.position) === JSON.stringify(twin.position)}`);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall flight checks passed');

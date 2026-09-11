@@ -56,9 +56,12 @@ export const BOUNDS = {
 // the view by its own DELTA -- there is no rate control on this axis and no
 // centre to return to, which is what makes a mouse a mouse. A thumb gets rate
 // control instead (see main.js); the two meet here.
-const PITCH_LIMIT = 1.35;    // rad. Short of vertical: the flying camera's up
-                             // is world up, and a look straight down it has no
-                             // defined roll.
+const PITCH_LIMIT = 1.35;    // rad. Short of vertical: a look straight along
+                             // "up" has no defined roll. Applied relative to
+                             // whatever "up" actually is at the time -- world
+                             // up while flying, the flower's own surface
+                             // normal while crawling -- not always world Y;
+                             // see look() below.
 
 // --- the airframe ----------------------------------------------------------
 // Speeds are set by how long it should take to cross the field rather than by
@@ -82,6 +85,41 @@ const THROTTLE_FALL = 7.0;   // 1/s, easing toward less
 // one axis that is not "go the way you're looking". Also the launch off a
 // flower.
 const CLIMB_ACC = 0.35;      // m/s^2
+
+// --- visual sway -------------------------------------------------------
+// Purely cosmetic lean, layered on top of the drawn body only -- nothing
+// here ever touches position, velocity, or the aim (see visualState).
+// A real flyer banks into a turn and pitches under a burst of thrust because
+// its own inertia resists the change; this bee has none, so nothing does
+// that on its own. Driving a damped spring off the acceleration the flight
+// model already computes each tick fakes the same tell without faking the
+// physics: a sustained turn holds a sustained bank (the spring's target
+// tracks sustained g), and letting go settles back to level with a swing or
+// two rather than snapping upright, because it is underdamped on purpose.
+const SWAY_MAX = 0.30;         // rad, clamp on the target lean either axis
+const SWAY_GAIN = 0.30;        // rad of target lean per m/s^2 of sensed g
+const SWAY_STIFFNESS = 70;     // 1/s^2, spring constant toward the target
+const SWAY_DAMPING = 7;        // 1/s, underdamped: ~0.42 of critical
+
+// --- visual bob --------------------------------------------------------
+// Also purely cosmetic (see SWAY_* above) and also never touches position,
+// velocity, or the aim -- a hovering insect never holds perfectly still, and
+// this fakes that same restlessness on top of an actually-stationary bee.
+// Three axes, three incommensurate frequencies, so the wander never visibly
+// repeats. Measured in the bee's OWN frame (right/up/forward), not world
+// space, so it reads as the bee fidgeting rather than as the air shoving it
+// sideways -- and rides along however the bee is pointed, climbing or
+// crawling upside-down alike.
+const BOB_AMP = [0.0009, 0.0006, 0.0007];      // m, right / up / forward
+const BOB_FREQ = [7.25, 11.5, 5.15];           // rad/s, incommensurate
+const BOB_PHASE = [0, 1.7, 3.4];               // rad, so the axes don't start in lockstep
+// The same fidget, as a small swivel rather than a slide: yaw/pitch/roll, at
+// their own incommensurate frequencies so the body never reads as translating
+// and rotating in lockstep -- two things happening for the same underlying
+// reason (a bee is not a rigid drone) rather than one thing scaled two ways.
+const BOB_ROT_AMP = [0.035, 0.025, 0.03];      // rad, yaw / pitch / roll
+const BOB_ROT_FREQ = [6.05, 8.65, 4.35];       // rad/s, incommensurate
+const BOB_ROT_PHASE = [2.1, 0.6, 4.8];         // rad
 
 // --- the camera orbit ------------------------------------------------------
 // Where the orbit STARTS, and the only number in this file that touches it. A
@@ -132,6 +170,58 @@ const cross3 = (a, b) => [
 function norm3(a) {
   const l = Math.hypot(a[0], a[1], a[2]) || 1;
   return [a[0] / l, a[1] / l, a[2] / l];
+}
+
+/** Rodrigues' rotation: `v` turned by `angle` radians about the unit `axis`. */
+function rotateAroundAxis(v, axis, angle) {
+  const c = Math.cos(angle), s = Math.sin(angle);
+  const d = dot3(v, axis);
+  const cx = cross3(axis, v);
+  return [
+    v[0] * c + cx[0] * s + axis[0] * d * (1 - c),
+    v[1] * c + cx[1] * s + axis[1] * d * (1 - c),
+    v[2] * c + cx[2] * s + axis[2] * d * (1 - c),
+  ];
+}
+
+/**
+ * Hold `dir` within `limit` radians of the horizontal plane through `up`,
+ * keeping its bearing -- the same shape as `clampToDome` below, but for a look
+ * direction instead of a walked position.
+ *
+ * This is what stands in for PITCH_LIMIT once `up` is not always world Y: the
+ * limit has to be measured against whatever axis is actually vertical right
+ * now, or it protects nothing. See the gimbal-lock note on `look()`.
+ */
+function clampElevation(dir, up, limit) {
+  const s = dot3(dir, up);
+  const maxS = Math.sin(limit);
+  if (Math.abs(s) <= maxS) return dir;
+  const horiz = [dir[0] - up[0] * s, dir[1] - up[1] * s, dir[2] - up[2] * s];
+  const hl = Math.hypot(horiz[0], horiz[1], horiz[2]);
+  const clampedS = Math.sign(s) * maxS;
+  const horizScale = Math.sqrt(Math.max(0, 1 - clampedS * clampedS));
+  // Exactly at the pole there is no bearing to keep; pick any horizontal
+  // direction rather than leave the look undefined.
+  const h = hl < 1e-9 ? tangentBasis(up).e1 : [horiz[0] / hl, horiz[1] / hl, horiz[2] / hl];
+  return [
+    h[0] * horizScale + up[0] * clampedS,
+    h[1] * horizScale + up[1] * clampedS,
+    h[2] * horizScale + up[2] * clampedS,
+  ];
+}
+
+/** Angle of `dir` above the horizontal plane through `up`, in [-pi/2, pi/2]. */
+function elevationOf(dir, up) {
+  return Math.asin(Math.max(-1, Math.min(1, dot3(dir, up))));
+}
+
+/** Unit bearing of `dir` projected onto the horizontal plane through `up`. */
+function bearingOf(dir, up) {
+  const s = dot3(dir, up);
+  const h = [dir[0] - up[0] * s, dir[1] - up[1] * s, dir[2] - up[2] * s];
+  const hl = Math.hypot(h[0], h[1], h[2]);
+  return hl < 1e-9 ? tangentBasis(up).e1 : [h[0] / hl, h[1] / hl, h[2] / hl];
 }
 
 /** Orthonormal basis of the flower head, from the frame the GPU published. */
@@ -209,8 +299,20 @@ export class BeeFlight {
     // the bee's own facing too: it always points straight away from the
     // camera. Written by look(), which the pointer calls; while crawling, A/D
     // turn the walk instead (see updateCrawl) and never touch this.
-    this.yaw = Math.atan2(-this.position[0], -this.position[2]);   // face the middle
-    this.pitch = START_PITCH;
+    //
+    // Stored as a direction rather than as yaw/pitch angles, because yaw/pitch
+    // is a spherical coordinate system with a pole -- and while a flying bee's
+    // pole sits safely above PITCH_LIMIT, a crawling bee's "up" is the flower's
+    // own surface normal, which can point anywhere within about 46 degrees of
+    // vertical (see CRAWL_MIN_ELEVATION). Measuring yaw/pitch against world Y
+    // regardless put that pole well inside the reachable view, so looking
+    // toward it read as gimbal lock: yaw sensitivity spiking near the pole,
+    // same as any FPS camera looking straight up, except the "straight up" a
+    // crawl could hit was a moving, tilted target rather than one comfortably
+    // fenced off by PITCH_LIMIT. See look() below.
+    const yaw0 = Math.atan2(-this.position[0], -this.position[2]);   // face the middle
+    const cp0 = Math.cos(START_PITCH);
+    this.lookDir = [Math.sin(yaw0) * cp0, Math.sin(START_PITCH), Math.cos(yaw0) * cp0];
     this.velocity = [0, 0, 0];
     // Smoothed throttle from W/S, eased toward -1/0/+1 at different rates
     // going up than coming down. See THROTTLE_RISE/THROTTLE_FALL.
@@ -225,17 +327,57 @@ export class BeeFlight {
     // Space, and the on-screen button. Lift while flying, the launch while
     // crawling; never anything to do with going forward.
     this.boost = 0;
+    // Cosmetic lean off the sensed g-force -- see SWAY_* and visualState.
+    // A damped spring toward a target, so *Vel is the spring's own rate, not
+    // a player input.
+    this.swayRoll = 0;
+    this.swayRollVel = 0;
+    this.swayPitch = 0;
+    this.swayPitchVel = 0;
+    // Clock for the cosmetic bob -- see BOB_* and visualState. Free-running,
+    // never reset by landing or taking off, so the fidget does not visibly
+    // restart every time the mode changes.
+    this.bobTime = 0;
   }
 
   /**
-   * Swing the camera orbit. The only place a POINTER can write yaw and pitch,
-   * so the mouse, a drag and anything else cannot end up disagreeing about the
-   * limit or the sign -- and, because moving the bee never calls this, looking
+   * Swing the camera orbit. The only place a POINTER can write it, so the
+   * mouse, a drag and anything else cannot end up disagreeing about the limit
+   * or the sign -- and, because moving the bee never calls this, looking
    * around can never move the bee.
+   *
+   * Yaw turns `lookDir` about `up`; pitch tilts it toward or away from `up`,
+   * about the axis perpendicular to both. `up` is world Y while flying, but
+   * the flower's own surface normal while crawling (see upVector) -- passing
+   * `sites` is what lets this look the normal up each call rather than always
+   * assuming world Y, which is the fix for the gimbal lock: PITCH_LIMIT is
+   * applied relative to whichever axis is actually vertical right now, so a
+   * crawl can never aim itself into a pole the way a fixed world-Y limit let
+   * it. Composing rotations like this, instead of steering separate yaw/pitch
+   * angles, also means there is no stored angle that needs re-basing when
+   * `up` changes between modes -- `lookDir` itself carries over unchanged, so
+   * landing and taking off never snap the view.
+   *
+   * Pitch is applied as a scalar elevation angle -- current elevation plus
+   * `dPitch`, clamped to PITCH_LIMIT -- rather than by rotating `lookDir`
+   * directly by `dPitch` radians. A single input event can carry a large
+   * delta (a fast trackpad swipe, a big mouse-drag callback all arrive as one
+   * `look()` call with the whole gesture folded into it, not one call per
+   * pixel), and rotating a vector by more than about a quarter turn can carry
+   * it PAST the pole and out the other side -- which clampElevation then
+   * projects back near the same limit, but on a bearing that is now roughly
+   * reversed. That read as the view flipping to face backwards for a single
+   * frame before snapping back. Clamping the elevation as a scalar instead
+   * saturates exactly the way the old yaw/pitch model did, however large
+   * `dPitch` is, because there is no vector rotation left to overshoot with.
    */
-  look(dYaw, dPitch) {
-    this.yaw += dYaw;
-    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch + dPitch));
+  look(dYaw, dPitch, sites) {
+    const up = this.upVector(sites);
+    const dir = rotateAroundAxis(this.lookDir, up, dYaw);
+    const elevation = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, elevationOf(dir, up) + dPitch));
+    const h = bearingOf(dir, up);
+    const c = Math.cos(elevation), s = Math.sin(elevation);
+    this.lookDir = norm3([h[0] * c + up[0] * s, h[1] * c + up[1] * s, h[2] * c + up[2] * s]);
     return this;
   }
 
@@ -246,8 +388,7 @@ export class BeeFlight {
    * where the bee points and where thrust runs -- see update().
    */
   forward() {
-    const cp = Math.cos(this.pitch);
-    return [Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp];
+    return this.lookDir;
   }
 
   /** Speed through the air, which is now simply the speed. */
@@ -383,16 +524,54 @@ export class BeeFlight {
     return sites.frame(this.plant, this.scratch);
   }
 
+  /**
+   * Pull `lookDir` back within PITCH_LIMIT of whatever "up" actually is right
+   * now. `look()` only re-clamps when the pointer moves, but "up" itself
+   * moves on its own: crawling, the surface normal drifts every frame under
+   * the bee's own feet -- the flower sways, the walk carries the bee round
+   * the dome -- and landing or taking off swaps it outright, in one frame,
+   * for an axis that can point up to 46 degrees away. Without reclamping
+   * here too, an aim that was safely off-pole when the pointer last moved
+   * could still end up hard against the NEW up's pole a moment later with no
+   * pointer motion at all -- gimbal lock the player never asked for and
+   * look() alone never sees happen.
+   */
+  reclampLook(sites) {
+    this.lookDir = clampElevation(this.lookDir, this.upVector(sites), PITCH_LIMIT);
+    return this;
+  }
+
+  /**
+   * Ease the cosmetic lean toward a target proportional to the sensed g --
+   * `lateral`/`along`, the world-space acceleration this tick resolved onto
+   * the bee's own right and forward axes. Crawling passes zero for both, so
+   * the spring simply relaxes back to level rather than tracking anything:
+   * there is no equivalent notion of a g-force in the walk, and a lean left
+   * over from the flight that ended in a landing should settle out, not
+   * freeze in place. See SWAY_* above and visualState below.
+   */
+  stepSway(step, lateral, along) {
+    const targetRoll = Math.max(-SWAY_MAX, Math.min(SWAY_MAX, SWAY_GAIN * lateral));
+    const targetPitch = Math.max(-SWAY_MAX, Math.min(SWAY_MAX, SWAY_GAIN * along));
+    this.swayRollVel += (SWAY_STIFFNESS * (targetRoll - this.swayRoll) - SWAY_DAMPING * this.swayRollVel) * step;
+    this.swayRoll += this.swayRollVel * step;
+    this.swayPitchVel += (SWAY_STIFFNESS * (targetPitch - this.swayPitch) - SWAY_DAMPING * this.swayPitchVel) * step;
+    this.swayPitch += this.swayPitchVel * step;
+  }
+
   /** @param {import('./sites.js').HeadSites|null} sites */
   update(dt, sites = null) {
     const step = Math.min(0.05, Math.max(1 / 240, dt));
     this.landCooldown = Math.max(0, this.landCooldown - step);
+    this.bobTime += step;
 
     if (this.mode === 'crawl') {
       const frame = this.currentFrame(sites);
-      if (!frame) return this;                  // no table yet: hold position
-      if (this.boost > 0) { this.takeOff(frame); return this; }
-      return this.updateCrawl(step, frame);
+      if (!frame) { this.stepSway(step, 0, 0); return this.reclampLook(sites); }   // no table yet: hold position
+      if (this.boost > 0) { this.takeOff(frame); this.stepSway(step, 0, 0); return this.reclampLook(sites); }
+      this.updateCrawl(step, frame);
+      this.stepSway(step, 0, 0);
+      return this.reclampLook(sites);
     }
 
     // A/D do nothing while flying -- the mouse is the only aim, and the bee
@@ -400,6 +579,7 @@ export class BeeFlight {
     const f = this.forward();
     this.facing = f;
     const v = this.velocity;
+    const v0 = [v[0], v[1], v[2]];
 
     // Screen axis, so W is -1 and S is +1. One signed axis, and it means the
     // same thing at both ends: a bee reverses perfectly well.
@@ -431,6 +611,17 @@ export class BeeFlight {
     for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
     this.clampToVolume();
 
+    // The g-force the bee just pulled: everything applyBounds and the thrust
+    // loop above did to the velocity this tick, resolved onto the bee's own
+    // forward and right axes. Thrust straight along the facing does not show
+    // up here (accelerating dead ahead has no lateral or vertical component
+    // to it), which is deliberate -- see SWAY_* -- but a turn (velocity
+    // lagging a facing that just swung), a boost, or rounding out at the
+    // meadow's edge all do.
+    const right = norm3(cross3(f, [0, 1, 0]));
+    const accel = [(v[0] - v0[0]) / step, (v[1] - v0[1]) / step, (v[2] - v0[2]) / step];
+    this.stepSway(step, dot3(accel, right), dot3(accel, f));
+
     // Touchdown, on whichever head's capture shell the bee is inside. The test
     // lives in sites.js because it is a property of a head, and the heads are
     // now six sizes: it is done in ellipsoid-normalised space, where every
@@ -439,7 +630,7 @@ export class BeeFlight {
       const hit = sites.landable(this.position, this.scratch);
       if (hit >= 0) this.land(sites.frame(hit, this.scratch));
     }
-    return this;
+    return this.reclampLook(sites);
   }
 
   /**
@@ -515,6 +706,63 @@ export class BeeFlight {
     const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
     if (frame) return this.surfaceState(frame).forward;
     return this.facing;
+  }
+
+  /**
+   * How the MODEL is actually drawn: position and (`bodyForward`, `upVector`)
+   * with three purely cosmetic effects layered on top -- a roll/pitch lean
+   * eased toward the sensed g-force (see stepSway), a small positional
+   * fidget that never stops, and a matching swivel of the body itself (see
+   * BOB_*). Nothing else ever reads this -- the camera looks along
+   * `viewForward`, the flight model steers by `forward`/`bodyForward`, and
+   * this exists solely for renderer.setBee to draw the mesh along. `sites` is
+   * only for the crawling case, where `bodyForward`/`upVector` need the live
+   * head frame.
+   */
+  visualState(sites) {
+    const fwd0 = this.bodyForward(sites);
+    const up0 = this.upVector(sites);
+    const uDot = dot3(up0, fwd0);
+    let u0 = norm3([up0[0] - fwd0[0] * uDot, up0[1] - fwd0[1] * uDot, up0[2] - fwd0[2] * uDot]);
+    if (!Number.isFinite(u0[0])) u0 = Math.abs(fwd0[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const r0 = cross3(u0, fwd0);
+
+    // The positional half of the fidget, in the bee's OWN (unswayed,
+    // unswivelled) frame -- see BOB_*.
+    const t = this.bobTime;
+    const bx = BOB_AMP[0] * Math.sin(BOB_FREQ[0] * t + BOB_PHASE[0]);
+    const by = BOB_AMP[1] * Math.sin(BOB_FREQ[1] * t + BOB_PHASE[1]);
+    const bz = BOB_AMP[2] * Math.sin(BOB_FREQ[2] * t + BOB_PHASE[2]);
+    const position = [
+      this.position[0] + r0[0] * bx + u0[0] * by + fwd0[0] * bz,
+      this.position[1] + r0[1] * bx + u0[1] * by + fwd0[1] * bz,
+      this.position[2] + r0[2] * bx + u0[2] * by + fwd0[2] * bz,
+    ];
+
+    // The swivel half: yaw about up, then pitch about the now-yawed right,
+    // then roll about the now-pitched forward -- applied to the base frame
+    // BEFORE the g-force lean, so the two effects compose rather than compete
+    // over which frame is "current".
+    const ry = BOB_ROT_AMP[0] * Math.sin(BOB_ROT_FREQ[0] * t + BOB_ROT_PHASE[0]);
+    const rp = BOB_ROT_AMP[1] * Math.sin(BOB_ROT_FREQ[1] * t + BOB_ROT_PHASE[1]);
+    const rr = BOB_ROT_AMP[2] * Math.sin(BOB_ROT_FREQ[2] * t + BOB_ROT_PHASE[2]);
+    let fwdB = rotateAroundAxis(fwd0, u0, ry);
+    let rB = rotateAroundAxis(r0, u0, ry);
+    fwdB = rotateAroundAxis(fwdB, rB, rp);
+    let uB = rotateAroundAxis(u0, rB, rp);
+    uB = rotateAroundAxis(uB, fwdB, rr);
+    rB = rotateAroundAxis(rB, fwdB, rr);
+
+    // The lean, on top of the swivelled frame -- roll swings (up, right)
+    // about forward, then pitch swings (forward, up) about the now-rolled
+    // right.
+    const u1 = rotateAroundAxis(uB, fwdB, this.swayRoll);
+    const r1 = rotateAroundAxis(rB, fwdB, this.swayRoll);
+    return {
+      position,
+      forward: rotateAroundAxis(fwdB, r1, this.swayPitch),
+      up: rotateAroundAxis(u1, r1, this.swayPitch),
+    };
   }
 
   get speed() { return Math.hypot(...this.velocity); }

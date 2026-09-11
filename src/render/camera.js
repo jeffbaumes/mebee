@@ -78,7 +78,12 @@ export class MacroCamera {
     this.pitch = 0.22;
 
     this.focalLength = 0.055;         // metres
-    this.fNumber = 4.0;
+    // Stopped down well past the macro-lens default: at f/4 the field is a
+    // couple of millimetres deep at bee scale, which throws almost everything
+    // but the exact thing looked at into blur. f/12 gives enough depth to
+    // read a flower and the ground under it in the same glance while still
+    // softening the background behind it.
+    this.fNumber = 12.0;
     this.focusDistance = 0.20;
     this.autoFocus = true;
 

@@ -113,30 +113,26 @@ const ORBIT_FOCAL = 0.055;   // the macro lens the still images are shot on
 /**
  * Where the camera sits relative to the bee.
  *
- * Third person, and specifically third person from BEHIND AND ABOVE, because
- * the two things this scene is worth doing are crawling over a flower head and
- * flying down onto one -- and in first person you cannot see yourself do
- * either. The rig is measured along the LOOK, not along the bee, so the mouse
- * swings the camera round the bee and the bee is seen from wherever the mouse
- * put it. Crawling pulls in and lifts: the flower is right there, and what you
- * want in frame is the bee on it, not the horizon past it.
+ * Third person, and specifically third person from directly BEHIND, with no
+ * vertical or angular offset, because the two things this scene is worth
+ * doing are crawling over a flower head and flying down onto one -- and in
+ * first person you cannot see yourself do either. The rig is measured along
+ * the LOOK, not along the bee, so the mouse swings the camera round the bee
+ * and the bee is seen from wherever the mouse put it.
  *
- * `tilt` aims the camera below the bee, and `back` was opened out to let it.
- * Landing was the manoeuvre this rig could not show: sitting close behind and
- * looking level along the flight path, the patch of meadow the bee was coming
- * down on stayed off the bottom edge until it was already on it, and the only
- * cue for height was the flower getting bigger. Pulling back to 68mm flattens
- * the angle down to the turf under the bee -- at 100mm up it is now inside the
- * frame instead of 30 degrees below it -- and the 0.155rad tilt puts the bee
- * itself just above the middle, which is the composition asked for: the centre
- * of the screen is the ground ahead, and where you are GOING is read off the
- * bee, which is drawn along the thrust axis and therefore points at it.
- *
- * Crawling keeps its tight rig and takes only enough tilt not to jump on
- * touchdown; there the thing worth seeing is already underneath.
+ * `lift` and `tilt` are both zero: the camera sits at the bee's own height and
+ * looks exactly along its facing, so the bee sits dead centre and its thrust
+ * axis runs straight through the middle of the screen. That is what makes the
+ * bee itself usable as the aim reticle -- flying at a flower or walking toward
+ * a landing spot is a matter of putting the bee's own silhouette on the
+ * target, which only lines up when nothing has nudged the frame off that
+ * axis. An earlier version lifted the rig and tilted it down to spend more of
+ * the frame on the ground ahead; that read better for landing but put the
+ * point you actually steer by above the centreline, which is the wrong trade
+ * once precise aim matters more than a generous view of the turf.
  */
-const CHASE_FLY = { back: 0.068, lift: 0.030, ahead: 0.018, tilt: 0.155 };
-const CHASE_CRAWL = { back: 0.034, lift: 0.022, ahead: 0.013, tilt: 0.14 };
+const CHASE_FLY = { back: 0.068, lift: 0, ahead: 0.018, tilt: 0 };
+const CHASE_CRAWL = { back: 0.034, lift: 0, ahead: 0.013, tilt: 0 };
 
 /**
  * Radius of the landing ring, in metres: about a bee's own length across.
@@ -146,6 +142,35 @@ const CHASE_CRAWL = { back: 0.034, lift: 0.022, ahead: 0.013, tilt: 0.14 };
  * standing on the thing the ring would be drawn on.
  */
 const MARK_RADIUS = 0.014;
+
+/**
+ * How long landing and take-off take to settle the view, in seconds.
+ *
+ * Crawling and flying use different rigs (CHASE_CRAWL vs CHASE_FLY) and
+ * different up vectors (a flower's surface normal vs world up), and both used
+ * to switch on the exact frame bee.mode did -- a hard cut in both the horizon
+ * roll and the camera's offset from the bee. Blending over a beat instead
+ * turns that cut into a settle, which is what "smoothly on and off the
+ * flower" means here: the aim itself (bee.lookDir) was already continuous
+ * across the mode change, so this is the only discontinuity left to smooth.
+ */
+const CHASE_BLEND_TIME = 0.35;
+
+const lerp3 = (a, b, t) => [
+  a[0] + (b[0] - a[0]) * t,
+  a[1] + (b[1] - a[1]) * t,
+  a[2] + (b[2] - a[2]) * t,
+];
+const normalize3 = (v) => {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+};
+const lerpChase = (a, b, t) => ({
+  back: a.back + (b.back - a.back) * t,
+  lift: a.lift + (b.lift - a.lift) * t,
+  ahead: a.ahead + (b.ahead - a.ahead) * t,
+  tilt: a.tilt + (b.tilt - a.tilt) * t,
+});
 
 /** What the controls do. Shown under the joystick. */
 const HINT = {
@@ -272,7 +297,7 @@ function bindInput() {
   });
   window.addEventListener('mousemove', (e) => {
     if (!locked()) return;
-    bee.look(-e.movementX * MOUSE_LOOK, -e.movementY * MOUSE_LOOK);
+    bee.look(-e.movementX * MOUSE_LOOK, -e.movementY * MOUSE_LOOK, renderer?.sites);
   });
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -322,7 +347,7 @@ function bindInput() {
       } else if (e.pointerId === lookId) {
         // Drag-to-orbit: the second finger on a phone, and the fallback for a
         // mouse whose owner has not clicked to capture it yet.
-        bee.look(-dx * MOUSE_LOOK, -dy * MOUSE_LOOK);
+        bee.look(-dx * MOUSE_LOOK, -dy * MOUSE_LOOK, renderer?.sites);
       }
       return;
     }
@@ -480,6 +505,10 @@ function setMode(mode) {
   document.getElementById('boost').hidden = !flying;
   document.getElementById('stick').hidden = !flying;
   document.getElementById('hint').hidden = !flying;
+  // The meadow panel is for looking at a flower up close, which the bee's own
+  // camera already does -- and it eats the corner of the screen a flying or
+  // crawling bee needs for its own controls.
+  document.getElementById('panel').hidden = flying;
   bee.steer = [0, 0];
   clearBoost();
   document.getElementById('boost').textContent = 'LIFT';
@@ -635,6 +664,10 @@ function resizeCanvas() {
 
   bindInput();
   bindControls();
+  // Land on the bee by default -- it is the thing this scene is for, and the
+  // orbit view is one tap away behind the mode button for anyone who wants a
+  // still look at a flower instead.
+  setMode('fly');
 
   // Dev hook. Every check in tools/ runs offline; this is the one thing they
   // cannot give -- a handle on the live scene, so a camera can be parked
@@ -702,6 +735,13 @@ function resizeCanvas() {
 
   const boostLabel = document.getElementById('boost');
   let lastBeeMode = bee.mode;
+  // Settles the chase rig and the horizon roll across a land or take-off; see
+  // CHASE_BLEND_TIME. `null` once whichever transition was running has
+  // finished settling into the target values.
+  let chaseBlend = null;
+  let lastUp = bee.upVector(null);
+  let lastChase = CHASE_FLY;
+  let lastMark = MARK_RADIUS;
 
   let last = performance.now();
   let frames = 0, fpsClock = last;
@@ -788,25 +828,19 @@ function resizeCanvas() {
       const sites = renderer.sites;
       bee.update(dt, sites);
       const look = bee.viewForward();
-      const up = bee.upVector(sites);
       const crawling = bee.mode === 'crawl';
-      // Third person, and the rig runs along the ORBIT rather than along the
-      // bee -- which is the whole point of separating them. The pointer swings
-      // the camera round the bee; the bee walks or flies underneath it, and in
-      // the air it is the orbit's own bearing that W then flies toward.
-      camera.setChase(bee.position, look, up, crawling ? CHASE_CRAWL : CHASE_FLY);
-      // Where the ground is, relative to the bee. Nothing else in the frame
-      // answers that: the sun's shadow lies downwind and falls on whatever the
-      // sun can see, not on what the bee is above.
-      renderer.markRadius = crawling ? 0 : MARK_RADIUS;
-      // The BODY faces where the bee is actually going, which is not where
-      // the camera is looking and has not been since the two came apart.
-      renderer.setBee(bee.position, bee.bodyForward(sites), up);
-      // Whatever the bee is standing on stays at the finest tier however the
-      // metric scores it -- it is a few millimetres from the lens.
-      state.pinnedPlant = bee.plant;
+      const targetUp = bee.upVector(sites);
+      const targetChase = crawling ? CHASE_CRAWL : CHASE_FLY;
+      const targetMark = crawling ? 0 : MARK_RADIUS;
+
       if (bee.mode !== lastBeeMode) {
         lastBeeMode = bee.mode;
+        // Start the settle from whatever the rig actually showed last frame,
+        // not from the pre-transition target -- so a land or take-off that
+        // interrupts an earlier settle still blends from where the view is,
+        // rather than snapping back to resume the old one. See
+        // CHASE_BLEND_TIME.
+        chaseBlend = { t: 0, fromUp: lastUp, fromChase: lastChase, fromMark: lastMark };
         // Landing and taking off swap the lens: see CRAWL_FOCAL.
         setFocalLength(crawling ? CRAWL_FOCAL : FLY_FOCAL);
         boostLabel.textContent = crawling ? 'TAKE OFF' : 'LIFT';
@@ -816,6 +850,38 @@ function resizeCanvas() {
         refreshKeys();
         refreshHint();
       }
+
+      let up = targetUp, chase = targetChase, mark = targetMark;
+      if (chaseBlend) {
+        chaseBlend.t += dt;
+        const k = Math.min(1, chaseBlend.t / CHASE_BLEND_TIME);
+        const eased = 1 - (1 - k) ** 3;
+        up = normalize3(lerp3(chaseBlend.fromUp, targetUp, eased));
+        chase = lerpChase(chaseBlend.fromChase, targetChase, eased);
+        mark = chaseBlend.fromMark + (targetMark - chaseBlend.fromMark) * eased;
+        if (k >= 1) chaseBlend = null;
+      }
+      lastUp = up; lastChase = chase; lastMark = mark;
+
+      // Third person, and the rig runs along the ORBIT rather than along the
+      // bee -- which is the whole point of separating them. The pointer swings
+      // the camera round the bee; the bee walks or flies underneath it, and in
+      // the air it is the orbit's own bearing that W then flies toward.
+      camera.setChase(bee.position, look, up, chase);
+      // Where the ground is, relative to the bee. Nothing else in the frame
+      // answers that: the sun's shadow lies downwind and falls on whatever the
+      // sun can see, not on what the bee is above.
+      renderer.markRadius = mark;
+      // The BODY faces where the bee is actually going, which is not where
+      // the camera is looking and has not been since the two came apart --
+      // plus a cosmetic bank/pitch off the g-force it's actually pulling and
+      // a small constant fidget (see visualState), neither of which the
+      // camera or the flight model ever sees.
+      const vis = bee.visualState(sites);
+      renderer.setBee(vis.position, vis.forward, vis.up);
+      // Whatever the bee is standing on stays at the finest tier however the
+      // metric scores it -- it is a few millimetres from the lens.
+      state.pinnedPlant = bee.plant;
     } else {
       // Orbit: follow the hero plant's head as it sways, so the subject does
       // not drift out of frame on a gusty day.
