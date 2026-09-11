@@ -150,7 +150,7 @@ const MARK_RADIUS = 0.014;
 /** What the controls do. Shown under the joystick. */
 const HINT = {
   capture: 'click to capture the mouse · esc to release',
-  fly: 'mouse or AD: aim · W: go · S: back up · space: up · let go to sink',
+  fly: 'mouse: aim · W: go · S: back up · space: up · let go to stop',
   crawl: 'mouse: orbit · WASD: walk the flower · space: take off',
   dragFly: 'drag: aim · stick: go and back up · LIFT: up',
   dragCrawl: 'drag: orbit · stick: walk the flower · TAKE OFF: launch',
@@ -169,26 +169,26 @@ function setFocalLength(metres) {
 /**
  * Controls.
  *
- * The keys fly the bee and the pointer orbits the camera, and neither does the
- * other's job. That is the whole scheme, and it is why you can swing the
- * camera round a flower head while the bee carries on straight past it.
+ * In the air, the mouse is the only aim: it orbits the camera around the bee,
+ * and the bee is always pointed dead away from the camera, on all three axes
+ * -- look up or down and the nose follows, instantly, with no turn radius to
+ * ease onto. A and D do nothing while flying, because there is no separate
+ * turning axis left for them to drive; on a flower they still turn the walk.
  *
- *   mouse (captured)   orbit the camera around the bee. Never moves the bee.
- *   A / D              swing that same orbit from the keyboard. In the air
- *                      that is aiming, not turning: it says where W will go.
- *                      On a flower it turns the walk directly.
- *                      Either way, nothing ever swings the orbit back: W
- *                      flying away from the camera lines the bee up under it
- *                      without the camera having to chase anything.
- *   W                  go. In the air the bee arcs onto the camera's heading
- *                      at its own turn rate and drives along it; on a flower
- *                      it walks forward.
- *   S                  the same as W with the sign flipped: the nose still
- *                      comes round onto the aim, the bee backs off along it.
- *                      On a flower, walk backward.
- *   space / LIFT       straight up, with no forward component at all; the
+ *   mouse (captured)   aim. Orbits the camera, and while flying that is also
+ *                      the bee's own facing and the line thrust runs along.
+ *   A / D              nothing in the air. On a flower, turns the walk.
+ *   W                  go, along the facing -- forward, up or down, whatever
+ *                      the camera is looking along. Winds up to speed over a
+ *                      beat rather than snapping to it. On a flower, walks
+ *                      forward.
+ *   S                  the same as W with the sign flipped, and sheds speed
+ *                      fast rather than winding down slowly. On a flower,
+ *                      walk backward.
+ *   space / LIFT       straight up, with no facing component at all; the
  *                      launch off a flower.
- *   nothing held       sinks, at 85mm/s. That is the landing -- see flight.js.
+ *   nothing held       drag alone brings the bee to a stop -- there is no
+ *                      gravity, so it holds still rather than sinking.
  *
  * On a phone there is no pointer to capture and no keyboard, so the thumbstick
  * takes the movement axes -- turn across, go and stop along -- the LIFT button

@@ -1,41 +1,29 @@
 // Bee flight.
 //
-// The camera says where to go and the keys decide whether to go there. The
-// pointer orbits the camera around the bee, A and D swing that orbit from the
-// keyboard, and the direction the camera faces is the heading being ASKED for.
-// W is what answers: hold it and the bee arcs onto that heading at a bounded
-// turn rate and drives along it, so a change of aim is a curve with a real
-// radius rather than the bee pivoting on the spot. S is the same thing with
-// the sign flipped -- the nose still comes round onto the camera's heading and
-// the bee backs away along it, which is how a real bee reverses and what makes
-// S a brake in practice without being written as one. Space lifts straight up.
+// The pointer is the only thing that aims: it orbits the camera around the
+// bee, and the bee is instantly pointed dead away from the camera, on all
+// three axes -- look up and the nose comes up with it, look down and it
+// dives. There is no turn rate and no radius to ease onto; the body simply
+// matches wherever the camera is looking, every frame.
 //
-// That gating matters and is the whole reason the two halves stay separate:
-// the camera never moves the bee. Swing it all the way round with nothing held
-// and the bee carries on exactly as it was, seen from a new angle. It is W
-// that turns the bee, toward wherever the camera happens to be pointing when
-// you press it.
+// A and D do nothing here. They used to swing the same orbit from the
+// keyboard, but with the bee always facing exactly where the camera points,
+// a keyboard swing of the orbit would swing the bee's nose right along with
+// it -- indistinguishable from turning on the spot. The mouse is the one and
+// only aim.
 //
-// And nothing here ever moves the camera. There was briefly a recentring term
-// that eased the orbit round to sit behind the bee while a movement key was
-// held; it is gone, because W flying AWAY from the camera does the same job
-// from the other end and does it without ever taking the orbit off the player.
-// Drive on the keys and the bee lines up under the camera on its own.
+// W and S are thrust along that facing, forward and back, and that is the
+// whole flight model: no separate turning axis, because pointing IS the
+// facing. W ramps up over a beat rather than snapping to full thrust, so
+// going feels like a wind-up; letting go (or S to brake) sheds it fast, so
+// stopping reads as immediate. Space lifts straight up, with no facing
+// component in it at all, and is also the launch off a flower.
 //
-// It is still an elytra rather than a hovercraft: gravity is always on, and
-// the wing only carries its own weight once there is speed over it. Speed in
-// either direction, so a reverse cruise holds height exactly as a forward one
-// does -- lift goes as the square of the airspeed, and airspeed has no sign.
-//
-// Which means the descent is simply letting go. Nothing held is no thrust, no
-// speed and therefore no lift, and what is left is gravity against plain drag:
-// an 85mm/s settle. The landing is line up over a head with W, then release
-// and let it come down.
-//
-// What all of this replaced was a model where thrust ran along the view
-// directly. It flew well enough in a straight line, but with no turn rate
-// between the two, every glance was a course change: you could not look at
-// something without flying at it.
+// There is no gravity. Nothing held is simply no thrust: drag alone brings
+// the bee to a stop wherever it is, in the air or not -- it does not sink.
+// That is the one deliberate departure from a real elytra, which this used
+// to model with lift-over-speed and a terminal sink rate; it read as the bee
+// fighting to stay up, which is not the feel this wants.
 
 import { FLOWER } from '../geom/flower.js';
 import { HeadSites, crawlAxes } from './sites.js';
@@ -77,51 +65,30 @@ const PITCH_LIMIT = 1.35;    // rad. Short of vertical: the flying camera's up
 // anything about a real bee -- at 5 m/s the seven-metre field would be gone in
 // a second and a half. Boosting flat out crosses it in about twenty seconds,
 // which leaves time to pick a flower out and go to it.
-const THRUST_ACC = 0.72;     // m/s^2 along the heading; W forward, S back
+const THRUST_ACC = 0.72;     // m/s^2 along the facing; W forward, S back
 const DRAG = 1.15;           // 1/s. Thrust over drag is the cruising speed
 // A hard cap, and one the cruise no longer sits right underneath: forward and
 // climb are separate axes now, and a bee doing both at once was being quietly
 // governed by a limit meant to catch a runaway dive.
 const MAX_SPEED = 0.80;      // m/s
-// How fast A and D swing the CAMERA -- they are the keyboard's half of the
-// orbit, the same axis the mouse drags, and like the mouse they move the bee
-// only by way of what W then does about it.
-const KEY_ORBIT_RATE = 2.0;  // rad/s at full deflection
-// The bee's own turn rate, at full throttle, easing onto whatever heading the
-// camera is asking for. This is the turning radius: the arc a bee at speed v
-// comes round on is v / HEADING_RATE, so a cruise at 0.6 m/s sweeps about
-// 370mm and a crawl-speed approach turns almost on the spot. Bounded rather
-// than eased, so the radius is a radius and not a curve that tightens as it
-// converges.
-const HEADING_RATE = 1.6;    // rad/s
-// Gravity, and the speed at which the wing carries essentially all of it. Lift
-// goes as the square of the airspeed, so a cruise on W is very nearly level
-// and letting go starts falling again. GRAVITY over DRAG is the terminal sink
-// with no speed over the wing: 85mm/s, which is also the landing descent.
-const GRAVITY = 0.098;       // m/s^2
-const TRIM_SPEED = 0.50;     // m/s
-const LIFT_MAX = 0.94;       // fraction of gravity a wing at trim carries
-// Straight up while space is held. Comfortably over gravity, so the climb is a
-// climb rather than a reduced sink -- 220mm/s from a standstill.
+// W/S do not apply THRUST_ACC directly -- they ease a throttle value toward
+// -1/0/+1 first, and the two directions ease at different rates. Winding up
+// is slow, so a press of W reads as a beat of effort before it takes hold;
+// letting go (or braking with S) is fast, so stopping reads as immediate
+// rather than a coast. Both are exponential rates, not linear ramps.
+const THROTTLE_RISE = 1.4;   // 1/s, easing toward more throttle
+const THROTTLE_FALL = 7.0;   // 1/s, easing toward less
+// Straight up while space is held, independent of the facing entirely -- the
+// one axis that is not "go the way you're looking". Also the launch off a
+// flower.
 const CLIMB_ACC = 0.35;      // m/s^2
-// How fast the drawn body settles onto its lean. The BEARING is not eased at
-// all -- it is the heading exactly, because thrust runs along the heading and
-// a body that lagged it would be pointing somewhere the bee was not going,
-// which is the one thing the third-person view is there to show.
-const FACE_RATE = 5.0;       // 1/s
-// How far off the horizontal the body leans, and how much climb rate it takes
-// to get there. A bee climbs with its wings, not its nose: this is enough that
-// a climb and a sink read differently at a glance and nothing like the angle
-// the flight path is actually on.
-const FACE_PITCH_LIMIT = 0.35;  // rad, about 20 degrees
-const FACE_PITCH_GAIN = 0.9;    // rad per m/s of climb
 
 // --- the camera orbit ------------------------------------------------------
 // Where the orbit STARTS, and the only number in this file that touches it. A
 // shade below the horizontal, because the rig it feeds is already looking down
 // (see CHASE_FLY in main.js) and this is where a meadow reads best. Nothing
 // eases it anywhere afterwards: once the scene is running the orbit belongs to
-// the pointer and to A/D, and to nothing else at all.
+// the pointer alone, and to nothing else at all.
 const START_PITCH = -0.10;   // rad
 // Fraction per second of the wall-ward velocity bled off at the very edge of
 // the cushion. A bare clamp reads as hitting glass; ramping the brake over the
@@ -238,23 +205,22 @@ export class BeeFlight {
     /** Which head the bee is standing on, or -1 in the air. */
     this.plant = -1;
     this.position = [this.start[0], this.start[1], this.start[2]];
-    // The CAMERA's orbit, in world space, in both modes. Written by look(),
-    // which the pointer calls, and by A/D, which is the same axis from the
-    // keyboard. Nothing else in this file touches it, and it never decides
-    // where the bee goes.
+    // The CAMERA's orbit, in world space, in both modes -- and, while flying,
+    // the bee's own facing too: it always points straight away from the
+    // camera. Written by look(), which the pointer calls; while crawling, A/D
+    // turn the walk instead (see updateCrawl) and never touch this.
     this.yaw = Math.atan2(-this.position[0], -this.position[2]);   // face the middle
     this.pitch = START_PITCH;
-    // Where the BEE points, which is a separate thing entirely: A and D turn
-    // this and nothing else does, and the thrust runs along it.
-    this.heading = this.yaw;
     this.velocity = [0, 0, 0];
-    // The drawn body: the heading, plus a lean off the horizontal that follows
-    // the climb rate. See faceHeading.
-    this.facePitch = 0;
-    this.facing = [Math.sin(this.heading), 0, Math.cos(this.heading)];
-    // Movement deflection in [-1,1], and ONLY movement, with the same meaning
-    // in both modes: x turns, y is the throttle (up is negative, as a screen
-    // axis is, so W is -1 and S is +1).
+    // Smoothed throttle from W/S, eased toward -1/0/+1 at different rates
+    // going up than coming down. See THROTTLE_RISE/THROTTLE_FALL.
+    this.throttle = 0;
+    // The drawn body. While flying this is just forward() -- see update();
+    // while crawling it comes from the walk (see bodyForward).
+    this.facing = this.forward();
+    // Movement deflection in [-1,1]. While flying only y (the throttle) does
+    // anything; x is read while crawling, to turn the walk. Up is negative,
+    // as a screen axis is, so W is -1 and S is +1.
     this.steer = [0, 0];
     // Space, and the on-screen button. Lift while flying, the launch while
     // crawling; never anything to do with going forward.
@@ -276,17 +242,12 @@ export class BeeFlight {
   /**
    * The orbit direction: from the camera toward the bee. Where the eye ends up
    * is this plus the rig (see MacroCamera.setChase), so swinging it round the
-   * yaw circle walks the camera round the bee. Not where the bee is going --
-   * that is `heading`, and the two are unrelated by design.
+   * yaw circle walks the camera round the bee. While flying, this is also
+   * where the bee points and where thrust runs -- see update().
    */
   forward() {
     const cp = Math.cos(this.pitch);
     return [Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp];
-  }
-
-  /** Which way the bee is pointing, on the flat. Thrust runs along this. */
-  headingVector() {
-    return [Math.sin(this.heading), 0, Math.cos(this.heading)];
   }
 
   /** Speed through the air, which is now simply the speed. */
@@ -338,29 +299,6 @@ export class BeeFlight {
     this.velocity = [0, 0, 0];
   }
 
-  /**
-   * Point the drawn body along the heading, with a lean for the climb rate.
-   *
-   * The bearing is taken exactly, not eased: A and D already turn at a bounded
-   * rate, so there is nothing to smooth, and the thrust runs along the heading
-   * -- a body lagging behind it would be visibly pointing somewhere the bee is
-   * not going. Only the lean is eased, and only because the climb rate itself
-   * can step (a brake, a wall, a take-off).
-   *
-   * This replaced a version that swung the body onto the FLIGHT PATH. That was
-   * right when the path was the only thing the player aimed; now the heading is
-   * what they aim, and the path is what the wind and the wing make of it.
-   */
-  faceHeading(step) {
-    const want = Math.max(-FACE_PITCH_LIMIT,
-      Math.min(FACE_PITCH_LIMIT, this.velocity[1] * FACE_PITCH_GAIN));
-    const k = 1 - Math.exp(-FACE_RATE * step);
-    this.facePitch += (want - this.facePitch) * k;
-    const f = this.headingVector();
-    const c = Math.cos(this.facePitch);
-    this.facing = [f[0] * c, Math.sin(this.facePitch), f[2] * c];
-  }
-
   /** Boost while crawling launches straight off the surface. */
   takeOff(frame) {
     const st = this.surfaceState(frame);
@@ -369,16 +307,12 @@ export class BeeFlight {
       st.point[1] + st.normal[1] * 0.012,
       st.point[2] + st.normal[2] * 0.012,
     ];
-    // Straight up off the surface, and the flying heading picks up the walk's
-    // bearing so the bee leaves pointing the way it was facing on the flower.
-    // The camera is left exactly where the player had it -- take-off is the
-    // bee's business, and snatching the view back would undo the look they
-    // just chose. The first press of W will bring the bee round under it.
+    // Straight up off the surface. The camera, and so the facing, is left
+    // exactly where the player had it -- take-off is the bee's business, and
+    // snatching the view back would undo the look they just chose.
     this.velocity = st.normal.map((n) => n * TAKEOFF_SPEED);
-    const flat = Math.hypot(st.forward[0], st.forward[2]);
-    if (flat > 1e-5) this.heading = Math.atan2(st.forward[0] / flat, st.forward[2] / flat);
-    this.facePitch = 0;
-    this.facing = this.headingVector();
+    this.throttle = 0;
+    this.facing = this.forward();
     this.mode = 'fly';
     this.plant = -1;
     this.landCooldown = LAND_COOLDOWN;
@@ -461,43 +395,29 @@ export class BeeFlight {
       return this.updateCrawl(step, frame);
     }
 
-    // A and D are the keyboard's orbit: they swing the camera, exactly as a
-    // mouse drag would, and by themselves that is all they do.
-    this.yaw -= this.steer[0] * KEY_ORBIT_RATE * step;
+    // A/D do nothing while flying -- the mouse is the only aim, and the bee
+    // is pointed dead away from the camera, below, on all three axes.
+    const f = this.forward();
+    this.facing = f;
+    const v = this.velocity;
 
     // Screen axis, so W is -1 and S is +1. One signed axis, and it means the
     // same thing at both ends: a bee reverses perfectly well.
-    const throttle = -this.steer[1];
+    const targetThrottle = -this.steer[1];
+    // Eases toward the target rather than snapping to it, and at a different
+    // rate going up than coming down: winding up to speed is a slow beat,
+    // letting go (or braking) sheds it fast. See THROTTLE_RISE/FALL.
+    const rate = Math.abs(targetThrottle) > Math.abs(this.throttle) ? THROTTLE_RISE : THROTTLE_FALL;
+    this.throttle += (targetThrottle - this.throttle) * (1 - Math.exp(-rate * step));
 
-    // The throttle is what turns the bee, and the camera is what it turns
-    // TOWARD. Gating the turn on the throttle is what keeps the camera out of
-    // the flight model: orbit all the way round with nothing held and the bee
-    // does not budge. It also happens to be how a wing works -- you turn by
-    // flying. Magnitude, not sign: reversing swings the nose onto the aim in
-    // exactly the same way, and the bee backs off along it.
-    const turning = Math.abs(throttle);
-    if (turning > 0) {
-      const d = Math.atan2(Math.sin(this.yaw - this.heading),
-                           Math.cos(this.yaw - this.heading));
-      const most = HEADING_RATE * turning * step;
-      this.heading += Math.max(-most, Math.min(most, d));
+    // Thrust runs along the full 3D facing now, not just the flat -- looking
+    // up and pressing W climbs, looking down dives. Space adds a pure vertical
+    // component on top of that, independent of where the camera is pointed.
+    const thrust = this.throttle * THRUST_ACC;
+    for (let a = 0; a < 3; a++) {
+      const extra = a === 1 ? this.boost * CLIMB_ACC : 0;
+      v[a] += (f[a] * thrust + extra - DRAG * v[a]) * step;
     }
-    const f = this.headingVector();
-    const v = this.velocity;
-
-    // Lift goes as the square of the airspeed, so the wing carries nearly all
-    // of its own weight at a cruise and almost none of it at a standstill.
-    // That, and not a steering term, is what makes this fly like a glider:
-    // speed keeps you up, and W is the only thing that makes speed.
-    const speed = Math.hypot(v[0], v[1], v[2]);
-    const carried = Math.min(1, (speed / TRIM_SPEED) ** 2) * LIFT_MAX;
-    // Signed: S is W with the sign flipped and nothing else about it changed.
-    // Horizontal, because `f` is -- forward and up are separate controls, and
-    // neither W nor S touches the height.
-    const thrust = throttle * THRUST_ACC;
-    v[0] += (f[0] * thrust - DRAG * v[0]) * step;
-    v[2] += (f[2] * thrust - DRAG * v[2]) * step;
-    v[1] += (this.boost * CLIMB_ACC - GRAVITY * (1 - carried) - DRAG * v[1]) * step;
 
     // A hard cap, not a soft one: whatever a dive builds up, the frame never
     // has to cope with more than this.
@@ -510,7 +430,6 @@ export class BeeFlight {
     this.applyBounds(step);
     for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
     this.clampToVolume();
-    this.faceHeading(step);
 
     // Touchdown, on whichever head's capture shell the bee is inside. The test
     // lives in sites.js because it is a property of a head, and the heads are
@@ -588,8 +507,9 @@ export class BeeFlight {
   }
 
   /**
-   * Where the BEE points: the walk heading while crawling, the steered heading
-   * while flying. Only the model is drawn along this; the camera never is.
+   * Where the BEE points: the walk heading while crawling, the camera's own
+   * facing while flying (see `facing`, set in update()). Only the model is
+   * drawn along this; the camera never is.
    */
   bodyForward(sites) {
     const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
