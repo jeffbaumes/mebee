@@ -57,9 +57,15 @@ struct VIn {
   @location(6) params  : vec3f,
 }
 
-/** Bloom and maturation: the plant's own phase, nudged by the panel. */
+/**
+ * Bloom and maturation. Unfurl is still scaled by the panel; the maturation
+ * front is the plant's own and nothing else's. There used to be a global shift
+ * on top of it, swept slowly across the whole field, which moved every disc in
+ * the meadow through its season in lockstep -- the one thing the per-plant
+ * spread in geom/species.js exists to avoid.
+ */
 fn plantBloom(P: PlantInstance) -> f32 { return clamp(P.phase.x * G.state.x, 0.0, 1.0); }
-fn plantFront(P: PlantInstance) -> f32 { return clamp(P.phase.y + G.state.y, 0.0, 1.0); }
+fn plantFront(P: PlantInstance) -> f32 { return clamp(P.phase.y, 0.0, 1.0); }
 
 @vertex
 fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
@@ -147,6 +153,10 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
 
   let isLeaf = kind == KIND_LEAF;
   if (isLeaf && vein.a < M.albedo.w) { discard; }
+  // A species with no ray whorl is the clover, and the clover is the only
+  // thing here with a compound leaf -- so this is "is this a trefoil leaflet",
+  // and it is the same test impostor.wgsl and floret.wgsl key off.
+  let isClover = P.phase.w < 0.5;
 
   // --- surface frame ------------------------------------------------------
   var N = normalize(i.nrm);
@@ -164,7 +174,12 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   var transmitTint = M.transmit.rgb;
 
   if (isLeaf) {
-    bump = vec2f(ridgeR - ridgeL, ridgeU - ridgeD) * M.flags.y * sharp;
+    // The vein maps are baked once for the whole field against a 40mm daisy
+    // blade. A 17mm clover leaflet is squeezed into the same texture space,
+    // so every rib comes out more than twice as coarse relative to the blade
+    // carrying it; at full strength that is corrugated iron, not a leaf.
+    let veinScale = select(1.0, 0.45, isClover);
+    bump = vec2f(ridgeR - ridgeL, ridgeU - ridgeD) * M.flags.y * sharp * veinScale;
     // Veins are opaque ribs; the lamina between them is what glows.
     thickness = (1.0 - vein.g * 0.92) * M.transmit.w * P.transmit.w;
     ao = detail.a;
@@ -197,25 +212,39 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   // rim and its v wraps the head, so the polar coordinates the lattice needs
   // are already in the mesh.
   if (kind == KIND_RECEPTACLE) {
-    let rn = clamp(sin(i.uv.y * PI * 0.5) * 1.22, 0.0, 1.22);
-    if (rn <= 1.0 && vis.tier > 0u) {
-      let theta = i.uv.x * (2.0 * PI / 6.0);
-      let d = discPattern(rn, theta, max(24.0, P.florets.y));
+    // The mesh stores r/discRadius in uv.y directly (see buildReceptacleMesh),
+    // so the flare of the involucre is the geometry's business and this does
+    // not have to know it. Past 1 is bract, not disc.
+    let rn = i.uv.y;
+    if (rn <= 1.0) {
       let front = plantFront(P);
-      let open = smoothstep(front, front + 0.20, rn) * plantBloom(P);
-      let unopened = P.leafCol.rgb * 0.75;
-      let discCol = mix(unopened, P.discCol.rgb, smoothstep(0.05, 0.65, open));
-      // Pollen on the anthers of the open ring, faded out with `sharp`: a
-      // grain is tens of microns, so it is the very first thing the blur eats.
-      let pollen = d.y * open * sharp * P.discCol.w;
-      albedo = mix(discCol * (0.72 + 0.55 * d.x), vec3f(0.96, 0.80, 0.30), pollen * 0.55);
-      // Florets are little tubes, so the disc is optically rough and its
-      // normal ripples on the lattice. Both fade as the pattern stops
-      // resolving, leaving a smooth cushion of the right average colour.
-      bump = vec2f(cos(21.0 * theta) * (d.x - 0.5), sin(34.0 * theta) * (d.x - 0.5)) * 0.9 * sharp;
-      roughness = mix(0.55, 0.82, sharp);
+      let bloom = plantBloom(P);
+      let open = smoothstep(front, front + 0.20, rn) * bloom;
+      let discCol = discAlbedo(P, rn, front, bloom);
+      // The cushion under the disc is disc-coloured at EVERY tier, not just
+      // the ones that paint the lattice on it. At the finest tier several
+      // hundred real florets stand on it and it shows only through the gaps
+      // between them -- but it was showing the foliage green there, which is
+      // most of what made a near flower's middle read greener than the same
+      // flower a metre away.
+      albedo = discCol * DISC_LATTICE_MEAN;
       specular = 0.030;
       thickness = 0.05;
+
+      // The lattice, but only where the florets themselves are not drawn.
+      if (vis.tier > 0u) {
+        let theta = i.uv.x * (2.0 * PI / 6.0);
+        let d = discPattern(rn, theta, max(24.0, P.florets.y));
+        // Pollen on the anthers of the open ring, faded out with `sharp`: a
+        // grain is tens of microns, so it is the first thing the blur eats.
+        let pollen = d.y * open * sharp * P.discCol.w;
+        albedo = mix(discCol * (0.72 + 0.55 * d.x), vec3f(0.96, 0.80, 0.30), pollen * 0.55);
+        // Florets are little tubes, so the disc is optically rough and its
+        // normal ripples on the lattice. Both fade as the pattern stops
+        // resolving, leaving a smooth cushion of the right average colour.
+        bump = vec2f(cos(21.0 * theta) * (d.x - 0.5), sin(34.0 * theta) * (d.x - 0.5)) * 0.9 * sharp;
+        roughness = mix(0.55, 0.82, sharp);
+      }
     }
   }
   N = normalize(N - (T * bump.x + B * bump.y));
@@ -226,7 +255,28 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   albedo *= 1.0 - M.flags.z * (0.5 - mottle) * sharp;
 
   if (isLeaf) {
-    albedo = mix(albedo, albedo * vec3f(1.28, 1.16, 0.72), vein.r * 0.55);
+    albedo = mix(albedo, albedo * vec3f(1.28, 1.16, 0.72),
+                 vein.r * select(0.55, 0.32, isClover));
+    // The watermark. A white clover leaflet carries a pale chevron across its
+    // lower third, pointing back toward the base at the midrib, and it is the
+    // single most recognisable thing about the plant -- a trefoil without one
+    // reads as generic foliage. Keyed off the ray count, the same way every
+    // other clover-only branch in the shaders is: a species with no ray whorl
+    // is the clover, and clover is the only thing here carrying a compound
+    // leaf. uv.y runs 1 at the leaflet's base to 0.14 at its apex, so the
+    // band is measured from the base end.
+    if (isClover) {
+      let along = 1.0 - i.uv.y;
+      // uv.x is squeezed into the reference blade's own half-width (0.27 at
+      // its widest, times the 0.90 clover.js keeps inside the teeth), so the
+      // margin sits about 0.24 either side of the midrib rather than 0.5.
+      // 4.1 brings that back to a 0..1 fraction across the leaflet.
+      let acrossN = clamp(abs(i.uv.x - 0.5) * 4.1, 0.0, 1.0);
+      let band = abs(along - (0.26 + 0.15 * acrossN));
+      let mark = (1.0 - smoothstep(0.014, 0.055, band)) *
+                 (1.0 - smoothstep(0.55, 0.85, along));
+      albedo = mix(albedo, albedo * vec3f(1.48, 1.40, 1.28) + vec3f(0.022), mark * 0.85);
+    }
     // Necrosis: dead margin tissue, which every real leaf has some of, and
     // more of on a plant that is going over.
     albedo = mix(albedo, vec3f(0.29, 0.16, 0.055),
@@ -306,5 +356,5 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
 
   if (i32(G.plant.w + 0.5) == 7) { color = tierColor(vis.tier) * (0.35 + 0.65 * diff); }
 
-  return vec4f(aerial(color, i.viewZ, -V, L), 1.0);
+  return vec4f(aerial(landingMark(color, i.world), i.viewZ, -V, L), 1.0);
 }

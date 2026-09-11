@@ -1,8 +1,41 @@
-// First-person bee flight.
+// Bee flight.
 //
-// Two inputs, as designed: drag steers, one button gives lift. Everything else
-// -- forward drift, sink, the way altitude lags behind the thumb -- comes from
-// the model, so the player is never asked to hold a heading or manage speed.
+// The camera says where to go and the keys decide whether to go there. The
+// pointer orbits the camera around the bee, A and D swing that orbit from the
+// keyboard, and the direction the camera faces is the heading being ASKED for.
+// W is what answers: hold it and the bee arcs onto that heading at a bounded
+// turn rate and drives along it, so a change of aim is a curve with a real
+// radius rather than the bee pivoting on the spot. S is the same thing with
+// the sign flipped -- the nose still comes round onto the camera's heading and
+// the bee backs away along it, which is how a real bee reverses and what makes
+// S a brake in practice without being written as one. Space lifts straight up.
+//
+// That gating matters and is the whole reason the two halves stay separate:
+// the camera never moves the bee. Swing it all the way round with nothing held
+// and the bee carries on exactly as it was, seen from a new angle. It is W
+// that turns the bee, toward wherever the camera happens to be pointing when
+// you press it.
+//
+// And nothing here ever moves the camera. There was briefly a recentring term
+// that eased the orbit round to sit behind the bee while a movement key was
+// held; it is gone, because W flying AWAY from the camera does the same job
+// from the other end and does it without ever taking the orbit off the player.
+// Drive on the keys and the bee lines up under the camera on its own.
+//
+// It is still an elytra rather than a hovercraft: gravity is always on, and
+// the wing only carries its own weight once there is speed over it. Speed in
+// either direction, so a reverse cruise holds height exactly as a forward one
+// does -- lift goes as the square of the airspeed, and airspeed has no sign.
+//
+// Which means the descent is simply letting go. Nothing held is no thrust, no
+// speed and therefore no lift, and what is left is gravity against plain drag:
+// an 85mm/s settle. The landing is line up over a head with W, then release
+// and let it come down.
+//
+// What all of this replaced was a model where thrust ran along the view
+// directly. It flew well enough in a straight line, but with no turn rate
+// between the two, every glance was a course change: you could not look at
+// something without flying at it.
 
 import { FLOWER } from '../geom/flower.js';
 import { HeadSites, crawlAxes } from './sites.js';
@@ -13,58 +46,87 @@ import { HeadSites, crawlAxes } from './sites.js';
  * `margin` is the soft cushion inside the wall. The ceiling clears the tallest
  * species (a cornflower runs to 330mm) with room to look down on it.
  *
- * `floorMargin` replaces it for the ground alone. The general margin is sized
- * for the outer walls, where there is nothing to see right at the edge
- * anyway; applied to the floor too it started pushing back a third of a
- * metre up, well above every low, ground-hugging species (a clover leaf tops
- * out under 65mm) -- so the one thing "get close to a short plant" needs was
- * exactly the one thing the cushion was built to prevent.
+ * `floorMargin` and `ceilingMargin` replace it above and below. The general
+ * margin is sized for the outer walls, where there is nothing to see right at
+ * the edge anyway. Applied to the floor it pushed back a third of a metre up,
+ * well above every low, ground-hugging species (a clover leaf tops out under
+ * 30mm) -- so the one thing "get close to a short plant" needs was exactly the
+ * one thing the cushion was built to prevent. Applied to the CEILING it was
+ * worse still: the volume is only 880mm tall, so a 350mm cushion braked the
+ * bee through the top 40% of everything it could fly in.
  */
 export const BOUNDS = {
   min: [-3.5, 0.020, -3.5],
   max: [3.5, 0.900, 3.5],
   margin: 0.35,
   floorMargin: 0.05,
+  ceilingMargin: 0.12,
 };
 
-// Speeds are set by how long it should take to cross the field, not by
+// --- looking ---------------------------------------------------------------
+// Radians of view per unit of pointer travel. The mouse is captured and moves
+// the view by its own DELTA -- there is no rate control on this axis and no
+// centre to return to, which is what makes a mouse a mouse. A thumb gets rate
+// control instead (see main.js); the two meet here.
+const PITCH_LIMIT = 1.35;    // rad. Short of vertical: the flying camera's up
+                             // is world up, and a look straight down it has no
+                             // defined roll.
+
+// --- the airframe ----------------------------------------------------------
+// Speeds are set by how long it should take to cross the field rather than by
 // anything about a real bee -- at 5 m/s the seven-metre field would be gone in
-// a second and a half. These cross it in about half a minute at full stick,
+// a second and a half. Boosting flat out crosses it in about twenty seconds,
 // which leaves time to pick a flower out and go to it.
-const CRUISE_FWD = 0.26;    // m/s at full forward stick
-const CRUISE_BACK = 0.13;   // m/s at full back stick; backing off is slower
-const CLIMB = 0.34;         // m/s added while boosting
-const SINK = 0.11;          // m/s of gentle settle with no boost
-const VERT_LAG = 2.6;       // 1/s. Lower = more floaty; this is ~0.4s to settle
-const HORIZ_LAG = 3.6;      // 1/s
-const TURN_RATE = 1.2;      // rad/s at full stick; a full circle in ~5s
-// The view tilt is feedback, not a control: the camera noses up as the bee
-// climbs and down as it settles, which is how you read your own vertical
-// motion without an instrument.
-const VIEW_TILT = 1.1;      // rad per m/s of vertical velocity
-const VIEW_TILT_LIMIT = 0.22;
-const VIEW_TILT_LAG = 3.0;  // 1/s
-// The view's altitude angle gravitates toward the nearest flower head, so the
-// subject stays in frame without ever being steered at. This replaces a plain
-// "look further down the higher you are", which aimed at the ground rather
-// than at the one thing in the scene worth looking at -- and which pointed
-// nowhere useful when the bee was low but far out.
-const AIM_PITCH_LIMIT = 1.05;  // rad. Short of vertical on purpose: the flying
-                               // camera's up is world up, and a look straight
-                               // down the up-vector has no defined roll.
-// Below this altitude, the nearest-by-distance flower can still be one
-// standing well above the bee -- there is always something close and low to
-// look at near the ground (grass, clover, the turf itself) even where
-// nothing tall happens to be nearby. Fading the upward half of the aim out
-// as the bee settles is what makes low flight read as skimming the sward
-// instead of craning up at whatever flower is nearest in three dimensions.
-// The downward half is never touched -- looking down at something close and
-// low is exactly what flying near the ground should do more of.
-const GROUND_AIM_FADE = 0.25;  // m: full upward aim restored above this
-// How far the player can nudge the view up or down on top of the auto aim
-// (see `look` on BeeFlight), within the same AIM_PITCH_LIMIT ceiling.
-const LOOK_PITCH_RANGE = 0.85;  // rad
-const WALL_PUSH = 5.0;      // m/s^2 at the very edge of the cushion
+const THRUST_ACC = 0.72;     // m/s^2 along the heading; W forward, S back
+const DRAG = 1.15;           // 1/s. Thrust over drag is the cruising speed
+// A hard cap, and one the cruise no longer sits right underneath: forward and
+// climb are separate axes now, and a bee doing both at once was being quietly
+// governed by a limit meant to catch a runaway dive.
+const MAX_SPEED = 0.80;      // m/s
+// How fast A and D swing the CAMERA -- they are the keyboard's half of the
+// orbit, the same axis the mouse drags, and like the mouse they move the bee
+// only by way of what W then does about it.
+const KEY_ORBIT_RATE = 2.0;  // rad/s at full deflection
+// The bee's own turn rate, at full throttle, easing onto whatever heading the
+// camera is asking for. This is the turning radius: the arc a bee at speed v
+// comes round on is v / HEADING_RATE, so a cruise at 0.6 m/s sweeps about
+// 370mm and a crawl-speed approach turns almost on the spot. Bounded rather
+// than eased, so the radius is a radius and not a curve that tightens as it
+// converges.
+const HEADING_RATE = 1.6;    // rad/s
+// Gravity, and the speed at which the wing carries essentially all of it. Lift
+// goes as the square of the airspeed, so a cruise on W is very nearly level
+// and letting go starts falling again. GRAVITY over DRAG is the terminal sink
+// with no speed over the wing: 85mm/s, which is also the landing descent.
+const GRAVITY = 0.098;       // m/s^2
+const TRIM_SPEED = 0.50;     // m/s
+const LIFT_MAX = 0.94;       // fraction of gravity a wing at trim carries
+// Straight up while space is held. Comfortably over gravity, so the climb is a
+// climb rather than a reduced sink -- 220mm/s from a standstill.
+const CLIMB_ACC = 0.35;      // m/s^2
+// How fast the drawn body settles onto its lean. The BEARING is not eased at
+// all -- it is the heading exactly, because thrust runs along the heading and
+// a body that lagged it would be pointing somewhere the bee was not going,
+// which is the one thing the third-person view is there to show.
+const FACE_RATE = 5.0;       // 1/s
+// How far off the horizontal the body leans, and how much climb rate it takes
+// to get there. A bee climbs with its wings, not its nose: this is enough that
+// a climb and a sink read differently at a glance and nothing like the angle
+// the flight path is actually on.
+const FACE_PITCH_LIMIT = 0.35;  // rad, about 20 degrees
+const FACE_PITCH_GAIN = 0.9;    // rad per m/s of climb
+
+// --- the camera orbit ------------------------------------------------------
+// Where the orbit STARTS, and the only number in this file that touches it. A
+// shade below the horizontal, because the rig it feeds is already looking down
+// (see CHASE_FLY in main.js) and this is where a meadow reads best. Nothing
+// eases it anywhere afterwards: once the scene is running the orbit belongs to
+// the pointer and to A/D, and to nothing else at all.
+const START_PITCH = -0.10;   // rad
+// Fraction per second of the wall-ward velocity bled off at the very edge of
+// the cushion. A bare clamp reads as hitting glass; ramping the brake over the
+// last few centimetres lets the bee round out of a dive on its own.
+const WALL_BRAKE = 1.0;
 
 // --- crawl -----------------------------------------------------------------
 // The shape of the landable surface, and how far out it captures, both live in
@@ -86,7 +148,13 @@ const CRAWL_FWD = 0.020;       // m/s
 const CRAWL_BACK = 0.012;
 const CRAWL_TURN = 1.6;        // rad/s
 const TAKEOFF_SPEED = 0.13;    // m/s along the surface normal
-const LAND_COOLDOWN = 0.7;     // s after take-off before landing can retrigger
+// Seconds after take-off before landing can retrigger. Longer than it was:
+// the launch used to be a dedicated climb rate, so it always went straight up
+// and out of the capture shell. Now the boost points wherever the camera does,
+// and a launch off a 56mm ox-eye aimed near the horizontal is still inside
+// that head's own shell when the old 0.7s ran out -- so the flower grabbed the
+// bee straight back, which reads as not being able to leave at all.
+const LAND_COOLDOWN = 1.2;
 
 const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross3 = (a, b) => [
@@ -149,10 +217,6 @@ function tangentBasis(n) {
   return { e1, e2: cross3(n, e1) };
 }
 
-/** Exponential approach that is correct for any timestep. */
-const approach = (current, target, rate, dt) =>
-  current + (target - current) * (1 - Math.exp(-rate * dt));
-
 export class BeeFlight {
   /** @param {number[]} start  where the bee begins, in world metres */
   constructor(start = [0.14, 0.30, 0.20]) {
@@ -174,26 +238,59 @@ export class BeeFlight {
     /** Which head the bee is standing on, or -1 in the air. */
     this.plant = -1;
     this.position = [this.start[0], this.start[1], this.start[2]];
-    // Face the middle of the field.
-    this.yaw = Math.atan2(-this.position[0], -this.position[2]);
-    this.pitch = 0;                 // derived from climb rate, not steered
+    // The CAMERA's orbit, in world space, in both modes. Written by look(),
+    // which the pointer calls, and by A/D, which is the same axis from the
+    // keyboard. Nothing else in this file touches it, and it never decides
+    // where the bee goes.
+    this.yaw = Math.atan2(-this.position[0], -this.position[2]);   // face the middle
+    this.pitch = START_PITCH;
+    // Where the BEE points, which is a separate thing entirely: A and D turn
+    // this and nothing else does, and the thrust runs along it.
+    this.heading = this.yaw;
     this.velocity = [0, 0, 0];
-    // Stick deflection in [-1,1]: x turns, y is throttle (up = forward).
+    // The drawn body: the heading, plus a lean off the horizontal that follows
+    // the climb rate. See faceHeading.
+    this.facePitch = 0;
+    this.facing = [Math.sin(this.heading), 0, Math.cos(this.heading)];
+    // Movement deflection in [-1,1], and ONLY movement, with the same meaning
+    // in both modes: x turns, y is the throttle (up is negative, as a screen
+    // axis is, so W is -1 and S is +1).
     this.steer = [0, 0];
+    // Space, and the on-screen button. Lift while flying, the launch while
+    // crawling; never anything to do with going forward.
     this.boost = 0;
-    // Second-finger look deflection in [-1,1], up positive. Rate control like
-    // `steer`, not delta: held off-centre it keeps nudging the view rather
-    // than needing continuous thumb travel. It rides on TOP of the auto aim
-    // rather than replacing it -- see LOOK_PITCH_RANGE -- so letting go
-    // settles back onto whatever the auto aim was already doing.
-    this.lookRate = 0;
   }
 
-  /** Where the camera looks: heading plus pitch. Travel ignores the pitch. */
+  /**
+   * Swing the camera orbit. The only place a POINTER can write yaw and pitch,
+   * so the mouse, a drag and anything else cannot end up disagreeing about the
+   * limit or the sign -- and, because moving the bee never calls this, looking
+   * around can never move the bee.
+   */
+  look(dYaw, dPitch) {
+    this.yaw += dYaw;
+    this.pitch = Math.max(-PITCH_LIMIT, Math.min(PITCH_LIMIT, this.pitch + dPitch));
+    return this;
+  }
+
+  /**
+   * The orbit direction: from the camera toward the bee. Where the eye ends up
+   * is this plus the rig (see MacroCamera.setChase), so swinging it round the
+   * yaw circle walks the camera round the bee. Not where the bee is going --
+   * that is `heading`, and the two are unrelated by design.
+   */
   forward() {
     const cp = Math.cos(this.pitch);
     return [Math.sin(this.yaw) * cp, Math.sin(this.pitch), Math.cos(this.yaw) * cp];
   }
+
+  /** Which way the bee is pointing, on the flat. Thrust runs along this. */
+  headingVector() {
+    return [Math.sin(this.heading), 0, Math.cos(this.heading)];
+  }
+
+  /** Speed through the air, which is now simply the speed. */
+  get airspeed() { return Math.hypot(this.velocity[0], this.velocity[1], this.velocity[2]); }
 
   /**
    * Surface point, normal and heading in world space, given the head's frame.
@@ -241,6 +338,29 @@ export class BeeFlight {
     this.velocity = [0, 0, 0];
   }
 
+  /**
+   * Point the drawn body along the heading, with a lean for the climb rate.
+   *
+   * The bearing is taken exactly, not eased: A and D already turn at a bounded
+   * rate, so there is nothing to smooth, and the thrust runs along the heading
+   * -- a body lagging behind it would be visibly pointing somewhere the bee is
+   * not going. Only the lean is eased, and only because the climb rate itself
+   * can step (a brake, a wall, a take-off).
+   *
+   * This replaced a version that swung the body onto the FLIGHT PATH. That was
+   * right when the path was the only thing the player aimed; now the heading is
+   * what they aim, and the path is what the wind and the wing make of it.
+   */
+  faceHeading(step) {
+    const want = Math.max(-FACE_PITCH_LIMIT,
+      Math.min(FACE_PITCH_LIMIT, this.velocity[1] * FACE_PITCH_GAIN));
+    const k = 1 - Math.exp(-FACE_RATE * step);
+    this.facePitch += (want - this.facePitch) * k;
+    const f = this.headingVector();
+    const c = Math.cos(this.facePitch);
+    this.facing = [f[0] * c, Math.sin(this.facePitch), f[2] * c];
+  }
+
   /** Boost while crawling launches straight off the surface. */
   takeOff(frame) {
     const st = this.surfaceState(frame);
@@ -249,10 +369,16 @@ export class BeeFlight {
       st.point[1] + st.normal[1] * 0.012,
       st.point[2] + st.normal[2] * 0.012,
     ];
-    this.velocity = st.normal.map((v) => v * TAKEOFF_SPEED);
-    // Face where the walk was heading, so the view does not snap on take-off.
-    this.yaw = Math.atan2(st.forward[0], st.forward[2]);
-    this.pitch = 0;
+    // Straight up off the surface, and the flying heading picks up the walk's
+    // bearing so the bee leaves pointing the way it was facing on the flower.
+    // The camera is left exactly where the player had it -- take-off is the
+    // bee's business, and snatching the view back would undo the look they
+    // just chose. The first press of W will bring the bee round under it.
+    this.velocity = st.normal.map((n) => n * TAKEOFF_SPEED);
+    const flat = Math.hypot(st.forward[0], st.forward[2]);
+    if (flat > 1e-5) this.heading = Math.atan2(st.forward[0] / flat, st.forward[2] / flat);
+    this.facePitch = 0;
+    this.facing = this.headingVector();
     this.mode = 'fly';
     this.plant = -1;
     this.landCooldown = LAND_COOLDOWN;
@@ -335,43 +461,56 @@ export class BeeFlight {
       return this.updateCrawl(step, frame);
     }
 
-    this.yaw -= this.steer[0] * TURN_RATE * step;
+    // A and D are the keyboard's orbit: they swing the camera, exactly as a
+    // mouse drag would, and by themselves that is all they do.
+    this.yaw -= this.steer[0] * KEY_ORBIT_RATE * step;
 
+    // Screen axis, so W is -1 and S is +1. One signed axis, and it means the
+    // same thing at both ends: a bee reverses perfectly well.
+    const throttle = -this.steer[1];
+
+    // The throttle is what turns the bee, and the camera is what it turns
+    // TOWARD. Gating the turn on the throttle is what keeps the camera out of
+    // the flight model: orbit all the way round with nothing held and the bee
+    // does not budge. It also happens to be how a wing works -- you turn by
+    // flying. Magnitude, not sign: reversing swings the nose onto the aim in
+    // exactly the same way, and the bee backs off along it.
+    const turning = Math.abs(throttle);
+    if (turning > 0) {
+      const d = Math.atan2(Math.sin(this.yaw - this.heading),
+                           Math.cos(this.yaw - this.heading));
+      const most = HEADING_RATE * turning * step;
+      this.heading += Math.max(-most, Math.min(most, d));
+    }
+    const f = this.headingVector();
     const v = this.velocity;
 
-    // The stick is turn and throttle. There is no default drift, so releasing
-    // it leaves the bee hovering rather than committing it to a heading it has
-    // to be steered out of -- which is the whole reason a constant cruise is
-    // hard to fly at this scale.
-    const throttle = -this.steer[1];               // stick up is forward
-    const speed = throttle >= 0 ? throttle * CRUISE_FWD : throttle * CRUISE_BACK;
-    const hx = Math.sin(this.yaw), hz = Math.cos(this.yaw);
-    // Enough lag that a hard turn carries the bee wide rather than pivoting it
-    // on the spot.
-    v[0] = approach(v[0], hx * speed, HORIZ_LAG, step);
-    v[2] = approach(v[2], hz * speed, HORIZ_LAG, step);
+    // Lift goes as the square of the airspeed, so the wing carries nearly all
+    // of its own weight at a cruise and almost none of it at a standstill.
+    // That, and not a steering term, is what makes this fly like a glider:
+    // speed keeps you up, and W is the only thing that makes speed.
+    const speed = Math.hypot(v[0], v[1], v[2]);
+    const carried = Math.min(1, (speed / TRIM_SPEED) ** 2) * LIFT_MAX;
+    // Signed: S is W with the sign flipped and nothing else about it changed.
+    // Horizontal, because `f` is -- forward and up are separate controls, and
+    // neither W nor S touches the height.
+    const thrust = throttle * THRUST_ACC;
+    v[0] += (f[0] * thrust - DRAG * v[0]) * step;
+    v[2] += (f[2] * thrust - DRAG * v[2]) * step;
+    v[1] += (this.boost * CLIMB_ACC - GRAVITY * (1 - carried) - DRAG * v[1]) * step;
 
-    // Altitude comes from the boost and gravity, nothing else. It is
-    // deliberately the laggiest axis: press and the climb builds over about
-    // half a second, release and it bleeds away over the same. That delay is
-    // the whole feel of a bee-suit hover.
-    const targetVy = this.boost * CLIMB - SINK;
-    v[1] = approach(v[1], targetVy, VERT_LAG, step);
+    // A hard cap, not a soft one: whatever a dive builds up, the frame never
+    // has to cope with more than this.
+    const after = Math.hypot(v[0], v[1], v[2]);
+    if (after > MAX_SPEED) {
+      const k = MAX_SPEED / after;
+      for (let a = 0; a < 3; a++) v[a] *= k;
+    }
 
-    for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
     this.applyBounds(step);
-
-    // Aim after moving, so the angle is the one this frame is rendered from.
-    // The climb tilt rides on top as feedback: the camera still noses up as
-    // the bee climbs and down as it settles, which is how you read your own
-    // vertical motion without an instrument. The player's own look, if any,
-    // rides on top of that -- a nudge on the auto aim, not a replacement --
-    // so releasing the second finger settles back onto the subject.
-    const climbTilt = Math.max(-VIEW_TILT_LIMIT,
-      Math.min(VIEW_TILT_LIMIT, v[1] * VIEW_TILT));
-    const target = Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT,
-      this.aimPitch(sites) + climbTilt + this.lookRate * LOOK_PITCH_RANGE));
-    this.pitch = approach(this.pitch, target, VIEW_TILT_LAG, step);
+    for (let a = 0; a < 3; a++) this.position[a] += v[a] * step;
+    this.clampToVolume();
+    this.faceHeading(step);
 
     // Touchdown, on whichever head's capture shell the bee is inside. The test
     // lives in sites.js because it is a property of a head, and the heads are
@@ -385,58 +524,44 @@ export class BeeFlight {
   }
 
   /**
-   * Elevation angle from the eye to the nearest flower head.
+   * Soft cushion, applied to this frame's velocity.
    *
-   * The table the GPU publishes is the honest source for where the heads
-   * actually are -- they sway, and the sway is solved there. The reference
-   * plant's height is the fallback for the first frames, before any readback
-   * has landed. This was written against a list when there was one flower in
-   * it, on the grounds that "nearest" is a list operation whatever the length;
-   * scaling it to several hundred was a one-line change, which is the whole
-   * argument for having done it that way.
-   */
-  aimPitch(sites) {
-    let best = [0, FLOWER.stemHeight, 0];
-    if (sites && sites.count > 0) {
-      const i = sites.nearest(this.position);
-      if (i >= 0) best = sites.frame(i, this.scratch).pos;
-    }
-    const flat = Math.hypot(best[0] - this.position[0], best[2] - this.position[2]);
-    // atan2 rather than atan: hovering directly over the head takes `flat` to
-    // zero, and the aim there wants to be straight down, not undefined. The
-    // clamp belongs here rather than at the call site -- straight down IS what
-    // this returns from overhead, and an unusable view angle should never
-    // leave the method that knows why it is capped.
-    const a = Math.atan2(best[1] - this.position[1], flat);
-    // See GROUND_AIM_FADE: only the upward half is damped, and only by how
-    // close to the ground the bee itself is -- not by anything about the
-    // target -- so a flower that is merely far away is unaffected.
-    const groundFade = Math.max(0, Math.min(1, this.position[1] / GROUND_AIM_FADE));
-    const damped = a > 0 ? a * groundFade : a;
-    return Math.max(-AIM_PITCH_LIMIT, Math.min(AIM_PITCH_LIMIT, damped));
-  }
-
-  /**
-   * Soft cushion first, hard stop second. A bare clamp reads as hitting glass;
-   * ramping a push-back over the last few centimetres lets the bee round out
-   * of a dive on its own.
+   * It is a brake rather than a push-back: inside the margin, whatever part of
+   * the velocity is heading into the wall is scaled down, to nothing at the
+   * wall itself. A push-back would be the more obvious model and is the wrong
+   * one here, because the velocity is rebuilt from the flight path every tick
+   * -- an impulse added to it would be thrown away before it could accumulate.
+   * Braking is also the better feel: the bee rounds out of a dive at the edge
+   * of the meadow rather than bouncing off it.
    */
   applyBounds(dt) {
-    const { min, max, margin, floorMargin } = BOUNDS;
+    const { min, max, margin, floorMargin, ceilingMargin } = BOUNDS;
+    const v = this.velocity;
     for (let a = 0; a < 3; a++) {
       const p = this.position[a];
-      // The floor gets its own, much closer cushion (see BOUNDS above); every
-      // other wall keeps the general one.
+      // Floor and ceiling get their own, much closer cushions (see BOUNDS
+      // above); the four side walls keep the general one.
       const lowMargin = a === 1 ? floorMargin : margin;
+      const highMargin = a === 1 ? ceilingMargin : margin;
       const under = min[a] + lowMargin - p;
-      const over = p - (max[a] - margin);
-      if (under > 0) this.velocity[a] += WALL_PUSH * (under / lowMargin) * dt;
-      if (over > 0) this.velocity[a] -= WALL_PUSH * (over / margin) * dt;
+      const over = p - (max[a] - highMargin);
+      if (under > 0 && v[a] < 0) {
+        v[a] *= Math.max(0, 1 - WALL_BRAKE * Math.min(1, under / lowMargin));
+      }
+      if (over > 0 && v[a] > 0) {
+        v[a] *= Math.max(0, 1 - WALL_BRAKE * Math.min(1, over / highMargin));
+      }
+    }
+  }
 
-      if (p < min[a]) {
+  /** Hard stop, after the step. The cushion should mean this never fires. */
+  clampToVolume() {
+    const { min, max } = BOUNDS;
+    for (let a = 0; a < 3; a++) {
+      if (this.position[a] < min[a]) {
         this.position[a] = min[a];
         this.velocity[a] = Math.max(0, this.velocity[a]);
-      } else if (p > max[a]) {
+      } else if (this.position[a] > max[a]) {
         this.position[a] = max[a];
         this.velocity[a] = Math.min(0, this.velocity[a]);
       }
@@ -450,26 +575,26 @@ export class BeeFlight {
     return [0, 1, 0];
   }
 
-  /** Camera forward: the walk heading while crawling, the look while flying. */
-  viewForward(sites) {
-    const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
-    if (frame) return this.surfaceState(frame).forward;
+  /**
+   * Where the CAMERA looks. The pointer's aim, in both modes.
+   *
+   * It used to be the walk heading while crawling, which meant turning on the
+   * spot swung the view and there was no way to look at the flower you were
+   * standing on from anywhere but behind your own head. The walk heading is
+   * still available -- as bodyForward, which is what it always was.
+   */
+  viewForward() {
     return this.forward();
   }
 
-  /** Where the lens should focus: the head underfoot, or the nearest one. */
-  focusTarget(sites) {
-    if (this.mode === 'crawl') {
-      const fwd = this.viewForward(sites);
-      return [this.position[0] + fwd[0] * 0.035,
-              this.position[1] + fwd[1] * 0.035,
-              this.position[2] + fwd[2] * 0.035];
-    }
-    if (sites && sites.count > 0) {
-      const i = sites.nearest(this.position);
-      if (i >= 0) return sites.frame(i, this.scratch).pos.slice(0, 3);
-    }
-    return [0, FLOWER.stemHeight, 0];
+  /**
+   * Where the BEE points: the walk heading while crawling, the steered heading
+   * while flying. Only the model is drawn along this; the camera never is.
+   */
+  bodyForward(sites) {
+    const frame = this.mode === 'crawl' ? this.currentFrame(sites) : null;
+    if (frame) return this.surfaceState(frame).forward;
+    return this.facing;
   }
 
   get speed() { return Math.hypot(...this.velocity); }

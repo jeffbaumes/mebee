@@ -8,7 +8,18 @@ export async function initWebGPU(canvas) {
   const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
   if (!adapter) throw new Error('No suitable GPU adapter was found.');
 
+  // Timestamp queries where the adapter has them: they are what render/profiler
+  // attributes a frame with, and there is nothing to lose by asking -- the
+  // feature is inert until a query set is made.
+  // rg11b10ufloat is the scene's colour target when it can be one: eleven and
+  // ten bit floats hold radiance perfectly well and halve the bandwidth of
+  // every clear, blend and store at full resolution, which on a laptop sharing
+  // its memory with the CPU is most of what the main pass costs.
+  const optional = ['timestamp-query', 'rg11b10ufloat-renderable']
+    .filter((f) => adapter.features.has(f));
+
   const device = await adapter.requestDevice({
+    requiredFeatures: optional,
     requiredLimits: {
       maxStorageBufferBindingSize: Math.min(
         adapter.limits.maxStorageBufferBindingSize, 64 * 1024 * 1024),

@@ -168,10 +168,19 @@ fn fs(i: VOut) -> @location(0) vec4f {
   } else {
     // Colour: disc in the middle, rays outside, blending over the band where a
     // real head's rays overlap the disc rim.
+    //
+    // The middle runs through discAlbedo on its own normalised radius, the
+    // same as the two mesh tiers -- so a head that crosses into the impostor
+    // does not swap a graded centre for a flat one. Reading the mature disc
+    // pigment straight, as this used to, meant the far field showed a clean
+    // yellow middle and the near field a dull one, on the same plant.
     let discFrac = clamp(P.orient.w / max(1e-5, P.orient.z), 0.05, 0.9);
     bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
+    let front = clamp(P.phase.y, 0.0, 1.0);
+    let rn = clamp(r / discFrac, 0.0, 1.0);
+    let discCol = discAlbedo(P, rn, front, bloom) * DISC_LATTICE_MEAN;
     let rayCol = mix(P.leafCol.rgb, mix(P.rayCol.rgb, P.tipCol.rgb, 0.35 * r), bloom);
-    albedo = mix(P.discCol.rgb, rayCol, smoothstep(discFrac * 0.75, discFrac * 1.5, r));
+    albedo = mix(discCol, rayCol, smoothstep(discFrac * 0.75, discFrac * 1.5, r));
   }
 
   // A shallow dome, so the blob is not a sticker. The normal starts as the

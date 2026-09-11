@@ -309,6 +309,25 @@ export const discDomeY = (rn, species = REFERENCE) =>
   species.head.dome * Math.pow(Math.max(0, 1 - rn * rn), species.head.domeExp);
 
 /**
+ * A globose head, for the one taxon here that has one.
+ *
+ * A capitulum is a flat-to-domed disc, and every other head in this file is
+ * placed on `discDomeY` over a Vogel spiral -- a model that has no way to say
+ * "and the florets carry on round the underside". A clover head is a BALL of
+ * pea flowers on a bare peduncle, which that model draws as a cushion with a
+ * flat bottom and a visible hole in it from anywhere below the equator.
+ *
+ * `head.globe` is the polar angle the florets wrap to, in radians: pi/2 is a
+ * hemisphere, and a little past it is what a real clover head does. When it is
+ * set, the placement below and the receptacle both switch to a sphere, and the
+ * normalised radius everything downstream keys off -- opening, ageing, the
+ * disc colour -- becomes the polar angle rather than a radius on a disc. That
+ * is the right generalisation: on a ball, "how far from the crown" IS the
+ * flower's clock, because a clover head opens from the bottom up.
+ */
+const globeAngle = (species) => species.head.globe ?? 0;
+
+/**
  * Vogel's model: r = c*sqrt(n), theta = n * goldenAngle. The golden angle is
  * the only divergence that never lets florets fall into radial rows, which is
  * why every real capitulum shows the same interlocking Fibonacci spirals.
@@ -321,25 +340,51 @@ export function buildFloretInstances(species = REFERENCE, seed = 5) {
   const Rd = species.head.discRadius;
   const data = new Float32Array(N * FLORET_INSTANCE_FLOATS);
 
+  const globe = globeAngle(species);
+  // How much of a floret's own neighbour spacing it fills. A capitulum's
+  // florets just touch; a clover's are long pea-flower tubes standing well
+  // proud of the head, so a species can ask for more.
+  const fill = species.head.floretScale ?? 0.52;
+
   for (let n = 0; n < N; n++) {
-    const rn = Math.sqrt((n + 0.5) / N);          // uniform areal density
-    const r = Rd * rn;
     const th = n * GOLDEN_ANGLE;
-    const x = Math.cos(th) * r, z = Math.sin(th) * r;
-    const y = discDomeY(rn, species);
+    let rn, x, y, z, nml, spacing;
 
-    // Dome normal from the analytic slope.
-    const h = 1e-4;
-    const slope = (discDomeY(Math.min(1, rn + h), species)
-                 - discDomeY(Math.max(0, rn - h), species)) / (2 * h * Rd);
-    const nr = -slope;
-    const nml = normalize([Math.cos(th) * nr, 1, Math.sin(th) * nr]);
+    if (globe > 0) {
+      // Even area over a spherical cap means uniform in cos(polar angle), the
+      // same way sqrt(n/N) is what makes the Vogel disc even in area.
+      const cosMax = Math.cos(globe);
+      const cosP = 1 - ((n + 0.5) / N) * (1 - cosMax);
+      const polar = Math.acos(Math.max(-1, Math.min(1, cosP)));
+      const sp = Math.sin(polar);
+      rn = polar / globe;
+      x = Math.cos(th) * sp * Rd;
+      y = Math.cos(polar) * Rd;
+      z = Math.sin(th) * sp * Rd;
+      // On a sphere the outward normal IS the position.
+      nml = normalize([x, y, z]);
+      // Cap area / N, as a disc of that area: the neighbour spacing.
+      spacing = Rd * Math.sqrt((2 * (1 - cosMax)) / N) * 2;
+    } else {
+      rn = Math.sqrt((n + 0.5) / N);              // uniform areal density
+      const r = Rd * rn;
+      x = Math.cos(th) * r;
+      z = Math.sin(th) * r;
+      y = discDomeY(rn, species);
 
-    // Hexagonal packing of N florets over a disc of radius Rd puts the
-    // neighbour spacing at Rd*sqrt(2*pi/(sqrt(3)*N)); a floret is about half
-    // that across, so neighbours just touch the way a real capitulum does.
-    const spacing = Rd * Math.sqrt((2 * Math.PI) / (Math.sqrt(3) * N));
-    const scale = spacing * 0.52 * rng.range(0.88, 1.12);
+      // Dome normal from the analytic slope.
+      const h = 1e-4;
+      const slope = (discDomeY(Math.min(1, rn + h), species)
+                   - discDomeY(Math.max(0, rn - h), species)) / (2 * h * Rd);
+      const nr = -slope;
+      nml = normalize([Math.cos(th) * nr, 1, Math.sin(th) * nr]);
+
+      // Hexagonal packing of N florets over a disc of radius Rd puts the
+      // neighbour spacing at Rd*sqrt(2*pi/(sqrt(3)*N)); a floret is about half
+      // that across, so neighbours just touch the way a real capitulum does.
+      spacing = Rd * Math.sqrt((2 * Math.PI) / (Math.sqrt(3) * N));
+    }
+    const scale = spacing * fill * rng.range(0.88, 1.12);
 
     // Written through named slots: the previous version laid the fields out in
     // source order (pos, normal, scale, radius), which put the normal's x into
@@ -477,34 +522,63 @@ export function buildReceptacleMesh(species = REFERENCE) {
   const mb = new MeshBuilder();
   const Rd = species.head.discRadius;
   const [NU, NV] = GRID.receptacle;
-  const RIM = 1.22;   // how far the bracts flare past the disc, in disc radii
+  // How far the involucral bracts flare past the disc, in disc radii. Every
+  // composite here has them; a clover is a legume and has none, so its own
+  // entry sets this to 1 and the cushion stops exactly where its florets do.
+  const RIM = species.head.bractFlare ?? 1.22;
 
-  const surf = (u, v) => {
-    const th = v * Math.PI * 2;
-    // Radial profile of a closed cap: r = 0 at u = 0. It used to start at
-    // 0.20*Rd, which made the cushion an annulus with a 2.3mm hole punched
-    // through the crown. Disc florets are round and pack with gaps, so they
-    // could never tile over it -- you saw straight through the middle of the
-    // flower to the sky behind.
-    const r = Rd * RIM * Math.sin(u * Math.PI * 0.5);
-    const rn = r / Rd;
+  // A globose head's cushion is the ball its florets stand on, so it is swept
+  // as a sphere on the same polar angle they are placed at -- and, like them,
+  // it carries on past the equator. Swept as a disc profile instead it stopped
+  // dead at the widest point and left the underside of the head open.
+  const globe = globeAngle(species);
+  const surf = globe > 0
+    ? (u, v) => {
+      const th = v * Math.PI * 2;
+      const polar = u * globe;
+      const r = Rd * Math.sin(polar);
+      return [Math.cos(th) * r, Rd * Math.cos(polar), Math.sin(th) * r];
+    }
+    : (u, v) => {
+      const th = v * Math.PI * 2;
+      // Radial profile of a closed cap: r = 0 at u = 0. It used to start at
+      // 0.20*Rd, which made the cushion an annulus with a 2.3mm hole punched
+      // through the crown. Disc florets are round and pack with gaps, so they
+      // could never tile over it -- you saw straight through the middle of the
+      // flower to the sky behind.
+      const r = Rd * RIM * Math.sin(u * Math.PI * 0.5);
+      const rn = r / Rd;
 
-    // Under the disc the cushion IS the dome the florets stand on, read from
-    // the same curve their instances are placed on, so the two cannot drift.
-    // Past the rim it falls away into the reflexed involucral bracts; `beyond`
-    // is zero at the rim with zero slope, so the two halves meet smoothly.
-    const beyond = Math.max(0, rn - 1) / (RIM - 1);
-    const y = discDomeY(Math.min(1, rn), species)
-      - Rd * 0.42 * Math.pow(beyond, 1.4)
-      + Rd * 0.035 * Math.cos(th * 13) * beyond;
-    return [Math.cos(th) * r, y, Math.sin(th) * r];
-  };
+      // Under the disc the cushion IS the dome the florets stand on, read from
+      // the same curve their instances are placed on, so the two cannot drift.
+      // Past the rim it falls away into the reflexed involucral bracts;
+      // `beyond` is zero at the rim with zero slope, so the two halves meet
+      // smoothly. A species with no bracts has no "past the rim" to fall into.
+      const beyond = RIM > 1 ? Math.max(0, rn - 1) / (RIM - 1) : 0;
+      const y = discDomeY(Math.min(1, rn), species)
+        - Rd * 0.42 * Math.pow(beyond, 1.4)
+        + Rd * 0.035 * Math.cos(th * 13) * beyond;
+      return [Math.cos(th) * r, y, Math.sin(th) * r];
+    };
 
   // axis 0: the receptacle is structural, not a lamina. Everything on the head
   // -- receptacle, florets, petal bases -- shares one frame at the stem tip and
   // must move as a single rigid body. Giving each part its own flutter phase is
   // what made the head warp and the disc florets lag behind the cup they sit in.
-  sampleSurface(mb, surf, NU, NV, { uv: (u, v) => [v * 6, u], axis: () => 0, stemHeight: 1 });
+  //
+  // uv.y is the NORMALISED RADIUS, not the surface parameter. plant.wgsl draws
+  // the disc lattice on this cushion whenever the florets themselves are not
+  // instanced, and it needs r/discRadius to do it; reconstructing that from
+  // the parameter meant repeating the rim flare in the shader, where it was
+  // written as a literal 1.22 and quietly became wrong for the first species
+  // that flares differently.
+  sampleSurface(mb, surf, NU, NV, {
+    // On a globe the parameter IS the normalised polar angle the florets are
+    // keyed to; on a disc it is the normalised radius.
+    uv: (u, v) => [v * 6, globe > 0 ? u : RIM * Math.sin(u * Math.PI * 0.5)],
+    axis: () => 0,
+    stemHeight: 1,
+  });
   return mb.finish();
 }
 

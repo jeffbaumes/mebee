@@ -17,6 +17,7 @@ import { SPECIES, SPECIES_BY_KEY, individual } from '../src/geom/species.js';
 import { makeRng } from '../src/geom/rand.js';
 import { growField } from '../src/geom/field.js';
 import { buildGrassBladeMesh } from '../src/geom/grass.js';
+import { MeshBuilder, sampleSurface } from '../src/geom/mesh.js';
 import { BOUNDS } from '../src/sim/flight.js';
 
 const W = Number(process.argv[3] || 720);
@@ -42,7 +43,7 @@ const views = {
   'bee':           { eye: [0.26, 0.22, 0.30], target: [0, 0.20, 0], fov: 44 },
   'lowgrass':      { eye: [0.16, 0.045, 0.20], target: [0, 0.09, 0], fov: 50 },
   // The whole point of the field: a wide, low look across it.
-  'meadow':        { eye: [0.4, 0.30, 2.1], target: [0.1, 0.13, -0.8], fov: 58 },
+  'meadow':        { eye: [0.30, 0.20, 1.55], target: [0.05, 0.14, -0.9], fov: 58 },
   // Straight down, which is the only view that shows the drifts as drifts.
   // Run it with GRASS=0, or the sward hides what it is meant to show.
   'plan':          { eye: [0, 3.2, 0.001], target: [0, 0, 0], fov: 62 },
@@ -144,12 +145,29 @@ if (view === 'meadow' || view === 'plan') {
   }
 }
 
+// The ground. ground.wgsl generates a camera-centred radial disc from
+// vertex_index alone, which there is nothing here to run; this is a plain
+// tessellated square of the same olive, and it exists because a sward that
+// lies ALONG the ground reads as nothing at all when there is no ground under
+// it. The old upright tuft did not need one, which is why there was none.
+if (process.env.GROUND !== '0' && view !== 'plan') {
+  const g = new MeshBuilder();
+  const HALF = 4.0, N = 33;
+  sampleSurface(g, (u, v) => [(u - 0.5) * 2 * HALF, 0, (v - 0.5) * 2 * HALF], N, N, {});
+  meshes.push({
+    mesh: g.finish(),
+    albedo: [0.062, 0.098, 0.036],
+    translucency: 0,
+    xform: (p) => p,
+  });
+}
+
 // Grass. The runtime hashes blade positions out of a world grid in the vertex
 // shader; this reproduces that placement on the CPU so the preview shows the
 // same sward the GPU would, rather than a second, differently-scattered one.
 if (process.env.GRASS !== '0') {
   const blade = buildGrassBladeMesh();
-  const CELL = 0.055, PER = 8, TUFT_CELLS = 1.6;
+  const CELL = 0.055, PER = 18, TUFT_CELLS = 1.6;
   const hash = (x, y) => {
     let h = Math.imul(Math.round(x * 131) ^ Math.round(y * 977), 2246822519);
     h = Math.imul(h ^ (h >>> 15), 3266489917);
@@ -164,9 +182,9 @@ if (process.env.GRASS !== '0') {
     if (!t) {
       const tc1 = hash(tcx * 0.913 + 5.31, tcz * 0.913 + 17.07);
       const tc2 = hash(tcx * 1.531 + 29.71, tcz * 1.531 + 3.19);
-      const exists = hash(tcx * 2.117 + 41.03, tcz * 2.117 + 61.87) > 0.32;
+      const exists = hash(tcx * 2.117 + 41.03, tcz * 2.117 + 61.87) > 0.14;
       const radius = CELL * TUFT_CELLS *
-        (0.06 + 0.12 * hash(tcx * 3.301 + 9.41, tcz * 3.301 + 71.23));
+        (0.12 + 0.22 * hash(tcx * 3.301 + 9.41, tcz * 3.301 + 71.23));
       t = {
         exists, radius,
         x: (tcx * TUFT_CELLS + tc1 * TUFT_CELLS) * CELL,
@@ -192,15 +210,24 @@ if (process.env.GRASS !== '0') {
         // Width jitter's own hash (h2 in grass.wgsl); folded in here since
         // this preview does not otherwise use a second per-blade offset.
         const h2 = hash(cx * 2.71 + b * 1.93 + 11, cz * 2.71 + b * 5.17);
-        const height = 0.055 * (0.45 + 1.5 * h1);
-        const width = 0.00035 * (0.7 + 0.65 * h2);
+        const h7 = hash(cx * 3.11 + b * 6.29 + 89, cz * 3.11 + b * 7.41);
+        // Arc LENGTH along the blade, not height: the blade arches over, so it
+        // stands up about half of this. Same constants as grass.wgsl -- a
+        // change there without a change here makes this preview lie.
+        const length = 0.045 * (0.45 + 1.3 * h1);
+        const width = 0.0018 * (0.7 + 0.65 * h2);
+        const tilt = 0.45 + 0.60 * h7;
+        const tc = Math.cos(tilt), ts = Math.sin(tilt);
         const cs = Math.cos(h3 * 6.283), sn = Math.sin(h3 * 6.283);
         meshes.push({
           mesh: blade,
           albedo: [0.055 + 0.05 * h1, 0.115 + 0.05 * h1, 0.028 + 0.014 * h1],
           translucency: 0.9,
           xform: (p) => {
-            const x = p[0] * height, y = p[1] * height, z = p[2] * width;
+            const px0 = p[0] * length, py0 = p[1] * length, z = p[2] * width;
+            // Lean out of vertical in the blade's own bending plane, then yaw.
+            const x = px0 * tc + py0 * ts;
+            const y = py0 * tc - px0 * ts;
             return [bx + x * cs - z * sn, y, bz + x * sn + z * cs];
           },
         });

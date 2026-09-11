@@ -1,6 +1,15 @@
 //!include common.wgsl
 
-// Fullscreen background: scattered sky plus the sun's actual disc.
+// Fullscreen background: the baked sky (see sky_lut.wgsl) plus the sun's
+// actual disc, and the strip of ground beyond the disc ground.wgsl reaches.
+//
+// Drawn AFTER the opaque geometry rather than before it, with a depth test, so
+// the only fragments that run are the ones nothing else covered. At bee height
+// that is the top of the frame and a thin band past the ground disc's sixty
+// metre rim -- perhaps a third of the pixels, where it used to be all of them.
+
+@group(1) @binding(0) var skyLut  : texture_2d<f32>;
+@group(1) @binding(1) var skySamp : sampler;
 
 struct VOut { @builtin(position) pos: vec4f, @location(0) ndc: vec2f }
 
@@ -22,7 +31,7 @@ fn fs(i: VOut) -> @location(0) vec4f {
   let dir = normalize(far.xyz / far.w - near.xyz / near.w);
 
   let sun = normalize(G.sunDir.xyz);
-  var col = skyRadiance(dir, sun);
+  var col = textureSampleLevel(skyLut, skySamp, skyUv(dir), 0.0).rgb;
 
   // Ground beyond the disc ground.wgsl actually tessellates. That disc reaches
   // sixty metres, by which point the aerial perspective has taken it almost
@@ -34,7 +43,7 @@ fn fs(i: VOut) -> @location(0) vec4f {
     let dist = max(0.0, G.cameraPos.y) / max(1e-4, -dir.y);
     let hit = G.cameraPos.xyz + dir * dist;
     let hab = habitatAt(hit.xz);
-    let coarse = fbm3(vec3f(hit.x * 3.5, 5.0, hit.z * 3.5), 2);
+    let coarse = fbm2(vec2f(hit.x * 3.5, hit.z * 3.5), 2);
     var albedo = mix(vec3f(0.098, 0.104, 0.042), vec3f(0.052, 0.108, 0.030),
                      smoothstep(0.25, 0.75, hab.r));
     albedo = mix(albedo, vec3f(0.085, 0.062, 0.040), clamp(hab.b * 0.55, 0.0, 0.5));
@@ -49,6 +58,7 @@ fn fs(i: VOut) -> @location(0) vec4f {
 
   // The solar disc, at its true angular size. Rendering it correctly sized is
   // what gives specular highlights and shadow penumbrae a believable scale.
+  // Analytic rather than baked: half a degree is smaller than a table texel.
   let cosAngle = dot(dir, sun);
   let cosRadius = cos(G.sunDir.w);
   if (cosAngle > cosRadius) {

@@ -3,6 +3,7 @@
 import { initWebGPU } from './gpu/device.js';
 import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
+import { ResolutionGovernor } from './render/resolution.js';
 import { BeeFlight } from './sim/flight.js';
 import { FLOWER } from './geom/flower.js';
 
@@ -41,7 +42,6 @@ const state = {
   // out of species.js: the field already contains buds, half-open heads and
   // ones going over. The panel shifts the whole meadow rather than setting it.
   bloom: 1.0,              // multiplier on each plant's unfurl, 0 = all bud
-  floretFront: 0.0,        // shift of the maturation front, -0.5 .. +0.5
   // Direct sun now enters as albedo/pi * E, so a mid-grey (0.18) under a
   // sunIntensity of 20 lands near 1.15 pre-tonemap -- close to clipping.
   // Halving brings it to a mid-tone; this is the knob to reach for first if
@@ -52,7 +52,7 @@ const state = {
   chromatic: 0.0022,
   vignette: 0.85,
   renderScale: 1.0,
-  animate: true,
+  autoResolution: true,    // hold a frame budget by moving the render scale
   debugView: 0,
   lodBias: 1.0,            // >1 spends more geometry than the lens asks for
   grassDensity: 1.0,
@@ -82,22 +82,79 @@ function fail(message, detail) {
 }
 
 // --- input -----------------------------------------------------------------
-// Radius, in CSS pixels, at which the steering drag reaches full deflection.
-// 60 rather than 90: the stick appears under the thumb, so this is the whole
+// Radius, in CSS pixels, at which the joystick reaches full deflection. 60
+// rather than 90: the stick appears under the thumb, so this is the whole
 // travel available without repositioning the hand.
 const STICK_RADIUS = 60;
 const STICK_SIZE = 132;
+// Radians of view per CSS pixel of pointer travel. The mouse is captured and
+// reports raw movement, so this is a plain delta -- move it and the view moves
+// with it, stop and it stops. Nothing about the bee is on this axis.
+const MOUSE_LOOK = 0.0030;
 
 // A macro lens is a telescope to fly with. At bee scale a narrow view gives
 // nothing to navigate by -- the flower fills the frame or is not in it at all.
-const FLY_FOCAL = 0.020;     // 62 deg vertical
-// Crawling, the flower head IS the floor, and the eye sits 4mm off it looking
-// along the surface. A longer lens looks straight over the florets underfoot
-// into the sky, so the walk loses the only thing it is walking on: at 62 deg
-// the surface starts 7mm ahead of the bee, at 74 deg it starts at 5mm and the
-// lower third of the frame is flower.
+//
+// Wider again now the camera aims BELOW the bee rather than along it (see
+// CHASE_FLY). The whole point of that tilt is to spend frame on the ground
+// being landed on, and at 62 degrees there was no frame to spend: the horizon
+// and the bee between them used all of it, and the turf the bee was descending
+// onto was off the bottom edge until the moment of contact. Everything gained
+// here goes downward -- what is ABOVE a bee it is not about to land on.
+const FLY_FOCAL = 0.0155;    // 75 deg vertical
+// Crawling, the flower head fills the lower half of the frame and the bee is
+// four millimetres off it. A longer lens looks straight over the florets
+// underfoot into the sky, so the walk loses the only thing it is walking on.
+// It is now marginally the TIGHTER of the two, which is the right way round:
+// on a flower head there is nothing further off than the head to look at.
 const CRAWL_FOCAL = 0.016;   // 74 deg vertical
 const ORBIT_FOCAL = 0.055;   // the macro lens the still images are shot on
+
+/**
+ * Where the camera sits relative to the bee.
+ *
+ * Third person, and specifically third person from BEHIND AND ABOVE, because
+ * the two things this scene is worth doing are crawling over a flower head and
+ * flying down onto one -- and in first person you cannot see yourself do
+ * either. The rig is measured along the LOOK, not along the bee, so the mouse
+ * swings the camera round the bee and the bee is seen from wherever the mouse
+ * put it. Crawling pulls in and lifts: the flower is right there, and what you
+ * want in frame is the bee on it, not the horizon past it.
+ *
+ * `tilt` aims the camera below the bee, and `back` was opened out to let it.
+ * Landing was the manoeuvre this rig could not show: sitting close behind and
+ * looking level along the flight path, the patch of meadow the bee was coming
+ * down on stayed off the bottom edge until it was already on it, and the only
+ * cue for height was the flower getting bigger. Pulling back to 68mm flattens
+ * the angle down to the turf under the bee -- at 100mm up it is now inside the
+ * frame instead of 30 degrees below it -- and the 0.155rad tilt puts the bee
+ * itself just above the middle, which is the composition asked for: the centre
+ * of the screen is the ground ahead, and where you are GOING is read off the
+ * bee, which is drawn along the thrust axis and therefore points at it.
+ *
+ * Crawling keeps its tight rig and takes only enough tilt not to jump on
+ * touchdown; there the thing worth seeing is already underneath.
+ */
+const CHASE_FLY = { back: 0.068, lift: 0.030, ahead: 0.018, tilt: 0.155 };
+const CHASE_CRAWL = { back: 0.034, lift: 0.022, ahead: 0.013, tilt: 0.14 };
+
+/**
+ * Radius of the landing ring, in metres: about a bee's own length across.
+ *
+ * Drawn straight down from the bee onto whatever is first underneath it -- see
+ * landingMark() in common.wgsl. Off while crawling, where the bee is already
+ * standing on the thing the ring would be drawn on.
+ */
+const MARK_RADIUS = 0.014;
+
+/** What the controls do. Shown under the joystick. */
+const HINT = {
+  capture: 'click to capture the mouse · esc to release',
+  fly: 'mouse or AD: aim · W: go · S: back up · space: up · let go to sink',
+  crawl: 'mouse: orbit · WASD: walk the flower · space: take off',
+  dragFly: 'drag: aim · stick: go and back up · LIFT: up',
+  dragCrawl: 'drag: orbit · stick: walk the flower · TAKE OFF: launch',
+};
 
 /** Set the lens, keeping the panel's slider honest about what it is. */
 function setFocalLength(metres) {
@@ -109,26 +166,67 @@ function setFocalLength(metres) {
   }
 }
 
+/**
+ * Controls.
+ *
+ * The keys fly the bee and the pointer orbits the camera, and neither does the
+ * other's job. That is the whole scheme, and it is why you can swing the
+ * camera round a flower head while the bee carries on straight past it.
+ *
+ *   mouse (captured)   orbit the camera around the bee. Never moves the bee.
+ *   A / D              swing that same orbit from the keyboard. In the air
+ *                      that is aiming, not turning: it says where W will go.
+ *                      On a flower it turns the walk directly.
+ *                      Either way, nothing ever swings the orbit back: W
+ *                      flying away from the camera lines the bee up under it
+ *                      without the camera having to chase anything.
+ *   W                  go. In the air the bee arcs onto the camera's heading
+ *                      at its own turn rate and drives along it; on a flower
+ *                      it walks forward.
+ *   S                  the same as W with the sign flipped: the nose still
+ *                      comes round onto the aim, the bee backs off along it.
+ *                      On a flower, walk backward.
+ *   space / LIFT       straight up, with no forward component at all; the
+ *                      launch off a flower.
+ *   nothing held       sinks, at 85mm/s. That is the landing -- see flight.js.
+ *
+ * On a phone there is no pointer to capture and no keyboard, so the thumbstick
+ * takes the movement axes -- turn across, go and stop along -- the LIFT button
+ * takes the space bar, and a second finger anywhere else orbits.
+ */
 function bindInput() {
   const pointers = new Map();
   let lastPinch = 0;
   let multiTouch = false;
   let travelled = 0;
   let lastTapTime = 0;
-  // Virtual stick: where the steering drag started, and where it is now.
+  // Virtual stick: which touch owns it, and where the drag began.
   let stickId = null;
   let stickOrigin = { x: 0, y: 0 };
+  // Whichever pointer is currently dragging the view: the second finger on a
+  // phone, or an uncaptured mouse.
+  let lookId = null;
   const stickEl = document.getElementById('stick');
   const knobEl = document.getElementById('stick-knob');
+  const hintEl = document.getElementById('hint');
 
-  // Look: a second stick, claimed by whichever finger is not already
-  // steering. Vertical only -- turning already has an axis, this is the one
-  // that was missing -- and rate-control like the steering stick, so holding
-  // it off-centre keeps the view moving rather than needing continuous travel.
-  let lookId = null;
-  let lookOrigin = { x: 0, y: 0 };
-  const lookEl = document.getElementById('look-stick');
-  const lookKnobEl = document.getElementById('look-knob');
+  const locked = () => document.pointerLockElement === canvas;
+  // Set once the browser has told us it will not grant the lock -- an embedded
+  // document that is not permitted to, most often. Drag-to-look is a perfectly
+  // good fallback; what is not acceptable is asking forever for a capture that
+  // is never going to come.
+  let captureRefused = false;
+  const showHint = () => {
+    if (state.mode !== 'fly') return;
+    const crawling = bee.mode === 'crawl';
+    if (hasTouch || captureRefused) {
+      hintEl.textContent = crawling ? HINT.dragCrawl : HINT.dragFly;
+    } else if (locked()) {
+      hintEl.textContent = crawling ? HINT.crawl : HINT.fly;
+    } else {
+      hintEl.textContent = HINT.capture;
+    }
+  };
 
   /** Move the joystick under the thumb, so no reach is ever required. */
   const placeStick = (x, y) => {
@@ -144,34 +242,59 @@ function bindInput() {
     stickEl.classList.remove('active');
     knobEl.style.transform = '';
   };
-  const placeLook = (x, y) => {
-    lookEl.style.left = `${x - STICK_SIZE / 2}px`;
-    lookEl.style.top = `${y - STICK_SIZE / 2}px`;
-    lookEl.style.right = 'auto';
-    lookEl.style.bottom = 'auto';
-    lookEl.classList.add('active');
-  };
-  const restLook = () => {
-    lookEl.style.left = '';
-    lookEl.style.top = '';
-    lookEl.style.right = '';
-    lookEl.style.bottom = '';
-    lookEl.classList.remove('active');
-    lookKnobEl.style.transform = '';
-  };
+
+  // --- pointer lock --------------------------------------------------------
+  // Captured, because a look that has to be dragged is a look you keep running
+  // out of screen for -- and because with the camera free of the bee there is
+  // a lot more looking to do. The browser only grants it from a user gesture,
+  // so the first click in fly mode spends itself on the capture.
+  canvas.addEventListener('click', () => {
+    if (state.mode !== 'fly' || hasTouch || captureRefused || locked()) return;
+    let request;
+    try {
+      request = canvas.requestPointerLock?.();
+    } catch {
+      captureRefused = true;
+    }
+    // Chrome returns a promise, and a refusal rejects it. That MUST be caught:
+    // an unhandled rejection reaches the global handler at the top of this
+    // file, which treats it as fatal and replaces the whole app with an error
+    // screen -- so a browser that simply declines to capture the pointer
+    // (anything inside a frame that is not permitted to) killed the page
+    // outright instead of falling back to dragging.
+    request?.catch?.(() => { captureRefused = true; showHint(); });
+    showHint();
+  });
+  document.addEventListener('pointerlockchange', () => {
+    // The mouse button cannot be released once the pointer is gone.
+    if (!locked()) setBoost('mouse', false);
+    showHint();
+  });
+  window.addEventListener('mousemove', (e) => {
+    if (!locked()) return;
+    bee.look(-e.movementX * MOUSE_LOOK, -e.movementY * MOUSE_LOOK);
+  });
 
   canvas.addEventListener('pointerdown', (e) => {
+    if (locked()) {
+      // Held mouse button is a second boost, which is where a finger already
+      // is once the pointer is captured.
+      if (e.button === 0) setBoost('mouse', true);
+      return;
+    }
     canvas.setPointerCapture(e.pointerId);
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pointers.size > 1) multiTouch = true;
-    if (state.mode === 'fly' && stickId === null) {
+    if (state.mode !== 'fly') return;
+    // The thumbstick goes to the first finger down and drives the bee; any
+    // second finger orbits. Same split in the air and on a flower, because the
+    // stick now means the same thing in both.
+    if (e.pointerType === 'touch' && stickId === null) {
       stickId = e.pointerId;
       stickOrigin = { x: e.clientX, y: e.clientY };
       placeStick(e.clientX, e.clientY);
-    } else if (state.mode === 'fly' && lookId === null) {
+    } else if (lookId === null) {
       lookId = e.pointerId;
-      lookOrigin = { x: e.clientX, y: e.clientY };
-      placeLook(e.clientX, e.clientY);
     }
   });
 
@@ -183,12 +306,10 @@ function bindInput() {
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 
     if (state.mode === 'fly') {
-      // Rate control, not delta control: hold the drag off-centre and the bee
-      // keeps turning. Delta steering would need continuous thumb travel to
-      // hold a turn, which is unusable on a phone.
       if (e.pointerId === stickId) {
-        // Clamp to a disc, not a square, so a diagonal drag cannot exceed full
-        // deflection on both axes at once.
+        // Rate control: hold the thumb off centre and it keeps going. Clamped
+        // to a DISC, not a square, so a diagonal cannot exceed full deflection
+        // on both axes at once.
         let ox = e.clientX - stickOrigin.x;
         let oy = e.clientY - stickOrigin.y;
         const len = Math.hypot(ox, oy);
@@ -196,16 +317,12 @@ function bindInput() {
           ox *= STICK_RADIUS / len;
           oy *= STICK_RADIUS / len;
         }
-        bee.steer = [ox / STICK_RADIUS, oy / STICK_RADIUS];
+        setStick(ox / STICK_RADIUS, oy / STICK_RADIUS);
         knobEl.style.transform = `translate(${ox}px, ${oy}px)`;
       } else if (e.pointerId === lookId) {
-        // Vertical only: dragging up looks up. This nudges the auto aim
-        // rather than replacing it (see BeeFlight.update), so it does not
-        // need a horizontal axis of its own -- turning already has one.
-        let oy = e.clientY - lookOrigin.y;
-        oy = Math.max(-STICK_RADIUS, Math.min(STICK_RADIUS, oy));
-        bee.lookRate = -oy / STICK_RADIUS;
-        lookKnobEl.style.transform = `translate(0px, ${oy}px)`;
+        // Drag-to-orbit: the second finger on a phone, and the fallback for a
+        // mouse whose owner has not clicked to capture it yet.
+        bee.look(-dx * MOUSE_LOOK, -dy * MOUSE_LOOK);
       }
       return;
     }
@@ -221,18 +338,15 @@ function bindInput() {
   });
 
   const release = (e) => {
+    if (locked()) { if (e.button === 0) setBoost('mouse', false); return; }
     const wasTap = !multiTouch && travelled < 12 && pointers.size === 1;
     pointers.delete(e.pointerId);
     if (e.pointerId === stickId) {
       stickId = null;
-      bee.steer = [0, 0];          // release levels the bee out
+      setStick(0, 0);
       restStick();
     }
-    if (e.pointerId === lookId) {
-      lookId = null;
-      bee.lookRate = 0;            // release settles back onto the auto aim
-      restLook();
-    }
+    if (e.pointerId === lookId) lookId = null;
     if (pointers.size < 2) lastPinch = 0;
     if (pointers.size > 0) return;
 
@@ -256,45 +370,107 @@ function bindInput() {
     camera.dolly(Math.exp(e.deltaY * 0.0011));
   }, { passive: false });
 
-  // --- boost ---------------------------------------------------------------
+  /**
+   * The thumbstick is the WASD block: across turns, along goes and stops. It
+   * used to be routed to whichever axis the mode left unreachable, which is no
+   * longer a question -- the two modes take the same two axes now.
+   */
+  function setStick(x, y) {
+    bee.steer = [x, y];
+  }
+  refreshHint = showHint;
+
+  // --- lift ----------------------------------------------------------------
+  // One button, and it means the same thing whatever else is happening: up. In
+  // the air that is thrust straight up, with nothing forward in it; on a
+  // flower it is the launch off the surface.
   const boostBtn = document.getElementById('boost');
-  const setBoost = (on) => {
-    bee.boost = on ? 1 : 0;
-    boostBtn.classList.toggle('held', on);
-  };
-  boostBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); setBoost(true); });
+  boostBtn.addEventListener('pointerdown', (e) => { e.preventDefault(); setBoost('button', true); });
   for (const ev of ['pointerup', 'pointercancel', 'pointerleave']) {
-    boostBtn.addEventListener(ev, () => setBoost(false));
+    boostBtn.addEventListener(ev, () => setBoost('button', false));
   }
   // A pointer lost to a phone call or a backgrounded tab must not stick.
-  window.addEventListener('blur', () => setBoost(false));
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'Space' && !e.repeat) { e.preventDefault(); setBoost(true); }
-  });
-  window.addEventListener('keyup', (e) => { if (e.code === 'Space') setBoost(false); });
+  window.addEventListener('blur', clearBoost);
 
-  // Arrow-key look, for a mouse and keyboard: the same manual nudge on top
-  // of the auto aim the second-finger stick gives a touch player.
-  const lookKeys = new Set();
-  const updateLookKeys = () => {
-    bee.lookRate = (lookKeys.has('ArrowUp') ? 1 : 0) - (lookKeys.has('ArrowDown') ? 1 : 0);
+  // --- keyboard ------------------------------------------------------------
+  // WASD is one axis pair with one meaning, in both modes: across is A/D and
+  // along is W/S. What that pair DRIVES differs -- the camera's aim in the
+  // air, the walk on a flower -- but that is flight.js's business, and it is
+  // why this reads the keys the same way whatever the bee is doing. It used to
+  // fork here, with W doubling as the boost while flying, and every state that
+  // could strand a held key with the wrong meaning went through this function.
+  const held = new Set();
+  const WALK = {
+    KeyA: [0, -1], ArrowLeft: [0, -1],
+    KeyD: [0, 1], ArrowRight: [0, 1],
+    KeyW: [1, -1], ArrowUp: [1, -1],
+    KeyS: [1, 1], ArrowDown: [1, 1],
+  };
+  const applyKeys = () => {
+    if (stickId !== null) return;      // a thumb already owns the movement
+    let x = 0, y = 0;
+    for (const code of held) {
+      const axis = WALK[code];
+      if (!axis) continue;
+      if (axis[0] === 0) x += axis[1]; else y += axis[1];
+    }
+    bee.steer = [Math.max(-1, Math.min(1, x)), Math.max(-1, Math.min(1, y))];
   };
   window.addEventListener('keydown', (e) => {
-    if (e.code !== 'ArrowUp' && e.code !== 'ArrowDown') return;
+    if (e.code !== 'Space' && !WALK[e.code]) return;
+    if (state.mode !== 'fly') return;
     e.preventDefault();
-    lookKeys.add(e.code);
-    updateLookKeys();
+    if (e.repeat) return;
+    if (e.code === 'Space') { setBoost('space', true); return; }
+    held.add(e.code);
+    applyKeys();
   });
   window.addEventListener('keyup', (e) => {
-    if (e.code !== 'ArrowUp' && e.code !== 'ArrowDown') return;
-    lookKeys.delete(e.code);
-    updateLookKeys();
+    if (e.code !== 'Space' && !WALK[e.code]) return;
+    if (e.code === 'Space') { setBoost('space', false); return; }
+    held.delete(e.code);
+    applyKeys();
   });
-  window.addEventListener('blur', () => { lookKeys.clear(); bee.lookRate = 0; });
+  window.addEventListener('blur', () => { held.clear(); bee.steer = [0, 0]; clearBoost(); });
+  // Landing and taking off swap what the keys mean, so re-read them.
+  refreshKeys = applyKeys;
 
   // --- mode ----------------------------------------------------------------
   document.getElementById('mode').addEventListener('click', () => setMode(
     state.mode === 'orbit' ? 'fly' : 'orbit'));
+}
+
+/** True on a device whose primary pointer cannot be captured. */
+const hasTouch = window.matchMedia?.('(pointer: coarse)').matches ?? false;
+
+/** Set by bindInput; the frame loop and setMode reach back through these. */
+let refreshHint = () => {};
+let refreshKeys = () => {};
+
+/**
+ * Who is currently asking for boost.
+ *
+ * A set rather than a boolean, because three things can ask at once -- the
+ * space bar, the on-screen button and the captured mouse button -- and any of
+ * them writing the flag directly means the others can switch it off underneath
+ * them. That is not hypothetical: a finger holding the button through a launch
+ * used to have its claim cancelled by a keyboard with nothing held, and the
+ * bee dropped straight back onto the flower it had just left.
+ */
+const boosting = new Set();
+
+/** The one place the boost is written, so no path can leave it stuck on. */
+function setBoost(source, on) {
+  if (on) boosting.add(source); else boosting.delete(source);
+  bee.boost = boosting.size > 0 ? 1 : 0;
+  const btn = document.getElementById('boost');
+  if (btn) btn.classList.toggle('held', bee.boost > 0);
+}
+
+/** Drop every claim, for a lost pointer, a blur, or a change of mode. */
+function clearBoost() {
+  boosting.clear();
+  setBoost('none', false);
 }
 
 function setMode(mode) {
@@ -303,24 +479,26 @@ function setMode(mode) {
   document.getElementById('mode').textContent = flying ? 'Orbit' : 'Fly';
   document.getElementById('boost').hidden = !flying;
   document.getElementById('stick').hidden = !flying;
-  document.getElementById('look-stick').hidden = !flying;
   document.getElementById('hint').hidden = !flying;
   bee.steer = [0, 0];
-  bee.boost = 0;
-  bee.lookRate = 0;
-  document.getElementById('boost').classList.remove('held');
-  document.getElementById('boost').textContent = 'CLIMB';
+  clearBoost();
+  document.getElementById('boost').textContent = 'LIFT';
 
   if (flying) {
     bee.reset();
     camera.mode = 'fly';
     setFocalLength(FLY_FOCAL);
   } else {
+    // Leaving the bee behind must also give the pointer back, or the panel
+    // and the orbit drag are both unreachable.
+    if (document.pointerLockElement === canvas) document.exitPointerLock?.();
+    document.getElementById('boost').hidden = true;
     camera.mode = 'orbit';
     setFocalLength(ORBIT_FOCAL);
     camera.resetFraming();
     camera.frameSubject(heroRadius, canvas.width / canvas.height);
   }
+  refreshHint();
 }
 
 /** Wire every slider to its state or camera field. */
@@ -329,7 +507,6 @@ function bindControls() {
     sunElevation: (v) => { state.sunElevation = v; },
     wind: (v) => { state.wind = v; },
     bloom: (v) => { state.bloom = v; },
-    floretFront: (v) => { state.floretFront = v; },
     fNumber: (v) => { camera.fNumber = v; },
     focalLength: (v) => { camera.focalLength = v; },
     exposure: (v) => { state.exposure = v; },
@@ -352,9 +529,6 @@ function bindControls() {
     el.addEventListener('input', sync);
     sync();
   }
-  document.getElementById('animate').addEventListener('change', (e) => {
-    state.animate = e.target.checked;
-  });
   // Whole header toggles, so the target is a thumb rather than a 24px glyph.
   const panel = document.getElementById('panel');
   panel.classList.toggle('open', window.innerWidth > 560);
@@ -364,12 +538,34 @@ function bindControls() {
   document.getElementById('debugView').addEventListener('change', (e) => {
     state.debugView = parseInt(e.target.value, 10) || 0;
   });
+  // Turning the slider is a statement that the player wants THIS resolution,
+  // so it takes the governor off the wheel. It hangs off the event rather than
+  // off the setter above because every control is synced once at startup, and
+  // that sync would otherwise switch the governor off before the first frame.
+  document.getElementById('renderScale').addEventListener('input', () => {
+    state.autoResolution = false;
+    document.getElementById('autoResolution').checked = false;
+  });
+  document.getElementById('autoResolution').addEventListener('change', (e) => {
+    state.autoResolution = e.target.checked;
+    // Handing control back starts from wherever the slider was left, so the
+    // image does not jump on the frame the box is ticked.
+    if (state.autoResolution) governor.scale = state.renderScale;
+  });
 }
 
+/**
+ * Holds the frame budget by moving the render scale. See render/resolution.js
+ * for why that is the knob rather than the sward or the geometry.
+ */
+const governor = new ResolutionGovernor();
+
 function resizeCanvas() {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2) * state.renderScale;
-  canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr));
-  canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  governor.setFloor(dpr);
+  const scale = state.autoResolution ? governor.scale : state.renderScale;
+  canvas.width = Math.max(1, Math.round(canvas.clientWidth * dpr * scale));
+  canvas.height = Math.max(1, Math.round(canvas.clientHeight * dpr * scale));
   // Re-fit on rotation: portrait and landscape need very different distances.
   camera.frameSubject(heroRadius, canvas.width / canvas.height);
 }
@@ -392,7 +588,18 @@ function resizeCanvas() {
     if (p) p.textContent = text;
     // Let the browser paint before the next synchronous burst; the leaf bake
     // alone blocks for the better part of a second on a phone.
-    return new Promise((r) => requestAnimationFrame(() => setTimeout(r, 0)));
+    //
+    // The timer is not belt and braces: a backgrounded tab is never handed a
+    // frame at all, so waiting on requestAnimationFrame alone left boot
+    // parked on this line for as long as the tab stayed hidden -- and the
+    // page then came to the foreground still showing the loading overlay.
+    // There is nothing to paint in that case, so whichever fires first wins.
+    return new Promise((r) => {
+      let settled = false;
+      const go = () => { if (!settled) { settled = true; r(); } };
+      requestAnimationFrame(() => setTimeout(go, 0));
+      setTimeout(go, 250);
+    });
   };
 
   try {
@@ -428,6 +635,36 @@ function resizeCanvas() {
 
   bindInput();
   bindControls();
+
+  // Dev hook. Every check in tools/ runs offline; this is the one thing they
+  // cannot give -- a handle on the live scene, so a camera can be parked
+  // somewhere specific and the frame compared against the last one.
+  window.__app = {
+    camera, state, bee, renderer, setMode, setFocalLength,
+    /** Park the orbit camera and the panel's state in one call. */
+    look(o = {}) {
+      if (o.target) camera.target = o.target;
+      if (o.dist !== undefined) { camera.userAdjusted = true; camera.distance = o.dist; }
+      if (o.yaw !== undefined) camera.yaw = o.yaw;
+      if (o.pitch !== undefined) camera.pitch = o.pitch;
+      if (o.focal !== undefined) setFocalLength(o.focal);
+      if (o.f !== undefined) camera.fNumber = o.f;
+      for (const k of ['wind', 'grassDensity', 'lodBias', 'sunElevation',
+                       'bloom', 'debugView']) {
+        if (o[k] !== undefined) state[k] = o[k];
+      }
+      return this;
+    },
+    /** Indices of every plant of a species, nearest the origin first. */
+    ofSpecies(key) {
+      const sp = renderer.species.findIndex((s) => s.key === key);
+      return renderer.plants
+        .map((p, i) => ({ i, p, d: Math.hypot(p.x, p.z) }))
+        .filter((e) => e.p.species === sp)
+        .sort((a, b) => a.d - b.d)
+        .map((e) => e.i);
+    },
+  };
   document.getElementById('build').textContent =
     `build ${globalThis.__BUILD__ ?? 'dev'}`;
   document.getElementById('loading').hidden = true;
@@ -464,7 +701,6 @@ function resizeCanvas() {
   });
 
   const boostLabel = document.getElementById('boost');
-  const hintEl = document.getElementById('hint');
   let lastBeeMode = bee.mode;
 
   let last = performance.now();
@@ -543,16 +779,6 @@ function resizeCanvas() {
     last = now;
     state.time += dt;
 
-    if (state.animate) {
-      // The maturation front creeps inward, so every disc opens outside-in the
-      // way a real capitulum does over a few days. This is a shift applied to
-      // the whole field on top of each plant's own phase, so the meadow moves
-      // through the season together without the plants falling into step.
-      state.floretFront = 0.35 * Math.cos(state.time * 0.06);
-      const el = document.getElementById('floretFront');
-      if (el) el.value = state.floretFront;
-    }
-
     renderer.lodBias = state.lodBias;
     renderer.grassDensity = state.grassDensity;
 
@@ -561,26 +787,41 @@ function resizeCanvas() {
       // far below what is visible at the speed the flowers sway.
       const sites = renderer.sites;
       bee.update(dt, sites);
-      camera.setFly(bee.position, bee.viewForward(sites), bee.upVector(sites));
-      camera.subject = bee.focusTarget(sites);
+      const look = bee.viewForward();
+      const up = bee.upVector(sites);
+      const crawling = bee.mode === 'crawl';
+      // Third person, and the rig runs along the ORBIT rather than along the
+      // bee -- which is the whole point of separating them. The pointer swings
+      // the camera round the bee; the bee walks or flies underneath it, and in
+      // the air it is the orbit's own bearing that W then flies toward.
+      camera.setChase(bee.position, look, up, crawling ? CHASE_CRAWL : CHASE_FLY);
+      // Where the ground is, relative to the bee. Nothing else in the frame
+      // answers that: the sun's shadow lies downwind and falls on whatever the
+      // sun can see, not on what the bee is above.
+      renderer.markRadius = crawling ? 0 : MARK_RADIUS;
+      // The BODY faces where the bee is actually going, which is not where
+      // the camera is looking and has not been since the two came apart.
+      renderer.setBee(bee.position, bee.bodyForward(sites), up);
       // Whatever the bee is standing on stays at the finest tier however the
-      // metric scores it -- it is four millimetres from the lens.
+      // metric scores it -- it is a few millimetres from the lens.
       state.pinnedPlant = bee.plant;
       if (bee.mode !== lastBeeMode) {
         lastBeeMode = bee.mode;
-        const crawling = bee.mode === 'crawl';
         // Landing and taking off swap the lens: see CRAWL_FOCAL.
         setFocalLength(crawling ? CRAWL_FOCAL : FLY_FOCAL);
-        boostLabel.textContent = crawling ? 'TAKE OFF' : 'CLIMB';
-        hintEl.textContent = crawling
-          ? 'stick: walk the flower \u00b7 take off to leave'
-          : 'stick: turn \u0026 throttle \u00b7 hold to climb';
+        boostLabel.textContent = crawling ? 'TAKE OFF' : 'LIFT';
+        // The walk and the aim take the same keys but not the same values, so
+        // re-read whatever is held down. Only the keys: a finger still on the
+        // LIFT button is still asking, and take-off must not cancel it.
+        refreshKeys();
+        refreshHint();
       }
     } else {
       // Orbit: follow the hero plant's head as it sways, so the subject does
       // not drift out of frame on a gusty day.
       renderer.headPosition(heroPlant, heroTarget);
       state.pinnedPlant = heroPlant;
+      renderer.bee.show = false;
     }
     if (traceHead && headTrace.length < 20000) {
       headTrace.push({
@@ -593,13 +834,34 @@ function resizeCanvas() {
     camera.update(canvas.width / canvas.height);
     renderer.render(camera, state, dt);
 
+    // Hold the budget. The profiler's total is the GPU's own account of the
+    // frame and is what the governor wants; where the device has no timestamps
+    // it falls back to wall clock, which can only tell it to slow down.
+    if (state.autoResolution) {
+      const gpuMs = renderer.profiler.total();
+      if (governor.update(gpuMs, dt) !== null) {
+        state.renderScale = governor.scale;
+        const el = document.getElementById('renderScale');
+        const out = document.getElementById('renderScale-val');
+        if (el) el.value = governor.scale;
+        if (out) out.textContent = governor.scale.toFixed(2);
+        resizeCanvas();
+      }
+    }
+
     frames++;
     if (now - fpsClock > 500) {
       const t = renderer.lod.stats.tiers;
+      const gpu = renderer.profiler.report([
+        ['sim', 'sim'], ['shadow', 'shadow'], ['main', 'main'],
+        ['dof', 'dof'], ['bloom', 'bloom'], ['post', 'post'],
+      ]);
       fpsEl.textContent =
         `${Math.round(frames * 1000 / (now - fpsClock))} fps  ${canvas.width}x${canvas.height}\n` +
         `lod ${t[0]}/${t[1]}/${t[2]} + ${t[3]} blobs of ${renderer.plantCount}  ` +
-        `${(renderer.triangles / 1000).toFixed(0)}k tris`;
+        `${(renderer.triangles / 1000).toFixed(0)}k tris  ` +
+        `scale ${(state.autoResolution ? governor.scale : state.renderScale).toFixed(2)}` +
+        (gpu ? `\n${gpu}` : '');
       frames = 0; fpsClock = now;
     }
     requestAnimationFrame(frame);

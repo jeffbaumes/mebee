@@ -76,19 +76,6 @@ export class HeadSites {
     };
   }
 
-  /** Index of the head nearest `p`, or -1 if the table is empty. */
-  nearest(p) {
-    const d = this.data;
-    let best = -1, bestD = Infinity;
-    for (let i = 0; i < this.count; i++) {
-      const o = i * SITE_FLOATS;
-      const dx = d[o] - p[0], dy = d[o + 1] - p[1], dz = d[o + 2] - p[2];
-      const dd = dx * dx + dy * dy + dz * dz;
-      if (dd < bestD) { bestD = dd; best = i; }
-    }
-    return best;
-  }
-
   /**
    * Index of the nearest head whose capture shell contains `p`, or -1.
    *

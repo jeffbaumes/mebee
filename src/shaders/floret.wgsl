@@ -28,6 +28,7 @@ struct VOut {
   @location(4) seed    : f32,
   @location(5) @interpolate(flat) vid : u32,
   @location(6) viewZ   : f32,
+  @location(7) radial  : f32,   // 0 at the crown of the dome, 1 at the rim
 }
 
 struct VIn {
@@ -58,7 +59,7 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   // every floret it passes anthesises. Each plant carries its own position in
   // that sweep, so a drift shows every stage at once the way a real one does.
   let bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
-  let front = clamp(P.phase.y + G.state.y, 0.0, 1.0);
+  let front = clamp(P.phase.y, 0.0, 1.0);
   let openness = smoothstep(front, front + 0.20, radial) * bloom;
 
   let localRest = mix(v.budPos, v.pos, openness);
@@ -85,6 +86,7 @@ fn vs(v: VIn, @builtin(instance_index) ii: u32) -> VOut {
   o.nrm = s.nrm;
   o.uv = v.uv;
   o.open = openness;
+  o.radial = radial;
   o.seed = f32(n) + P.phase.z * 97.0;
   o.vid = slot;
   o.clip = G.viewProj * vec4f(s.pos, 1.0);
@@ -107,11 +109,26 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
   let ndl = dot(N, L);
   let sun = G.sunColor.rgb * G.sunColor.w;
 
-  // Immature florets are green and tight; mature ones flush to the species'
+  // Immature florets are tight and pale; mature ones flush to the species'
   // own disc pigment and carry pollen. The gradient across the disc is the
-  // flower's clock, made visible.
-  let unopened = P.leafCol.rgb * 0.70;
-  var albedo = mix(unopened, P.discCol.rgb, smoothstep(0.05, 0.65, i.open));
+  // flower's clock, made visible -- and it is discAlbedo's, shared with the
+  // two coarser tiers so the middle of the flower does not change colour when
+  // the plant crosses a threshold. It is fed this floret's own place in the
+  // disc, which is the same number the vertex stage morphed the geometry on.
+  let bloom = clamp(P.phase.x * G.state.x, 0.0, 1.0);
+  let front = clamp(P.phase.y, 0.0, 1.0);
+  var albedo = discAlbedo(P, i.radial, front, bloom) * DISC_LATTICE_MEAN;
+
+  // A ray-less species is a clover ball, and it ages the other way round from
+  // a capitulum. A composite opens rim-inward and drops its spent rays; a
+  // clover head opens from the bottom up and keeps its spent florets, which
+  // go brown and hang. `radial` is measured from the crown of the dome, so on
+  // a near-hemisphere it IS distance down from the top -- which is exactly
+  // where the brown belongs.
+  if (P.phase.w < 0.5) {
+    let spent = smoothstep(0.76, 1.0, i.radial) * (0.35 + 0.65 * P.phase.y);
+    albedo = mix(albedo, vec3f(0.255, 0.170, 0.075), spent * 0.75);
+  }
 
   // Pollen: bright, slightly warm grains clustered on the anthers of open
   // florets. Sub-pixel at this scale, so they mostly survive as sparkle that
@@ -135,5 +152,5 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
 
   color += albedo * skyAmbient(N);
   if (i32(G.plant.w + 0.5) == 7) { color = vec3f(0.90, 0.20, 0.20) * 0.6; }
-  return vec4f(aerial(color, i.viewZ, -V, L), 1.0);
+  return vec4f(aerial(landingMark(color, i.world), i.viewZ, -V, L), 1.0);
 }

@@ -73,32 +73,77 @@ fn fs(i: VOut) -> @location(0) vec4f {
   var albedo = mix(dry, lush, smoothstep(0.25, 0.75, hab.r));
   albedo = mix(albedo, soil, clamp(hab.b * 0.55, 0.0, 0.5));
 
-  // Sward texture. Two octaves, and only two: this covers the whole lower half
-  // of the frame, so an octave here costs more than the entire flower field.
-  // The high frequency is blade scale and is deliberately allowed to alias
-  // into a wash beyond a few centimetres -- that IS what a lawn looks like
-  // once it is smaller than the resolving limit, and the defocus pass finishes
-  // the job.
-  let fine = valueNoise3(vec3f(i.world.x * 210.0, 0.0, i.world.z * 210.0));
-  let mid  = fbm3(vec3f(i.world.x * 17.0, 3.0, i.world.z * 17.0), 2);
+  // Sward texture. The high frequency is blade scale and is deliberately
+  // allowed to alias into a wash beyond a few centimetres -- that IS what a
+  // lawn looks like once it is smaller than the resolving limit, and the
+  // defocus pass finishes the job.
+  //
+  // Both lattices are turned off the world axes before they are sampled.
+  // Value noise is built on an axis-aligned grid and its gradient vanishes at
+  // every lattice point, so sampled square-on over a flat plane the cells read
+  // as a literal checkerboard -- which is exactly what the ground was showing
+  // once the sward stopped hiding it. The turn costs two multiplies and leaves
+  // the cells crossing the view at an angle, where they read as mottling.
+  let rot = mat2x2f(0.8763, -0.4818, 0.4818, 0.8763);   // ~28 degrees
+  let q = rot * i.world.xz;
+  // Three octaves rather than two, and the contrast well under what it was.
+  // Beyond half a metre `detail` has faded the blade-scale octave out
+  // entirely, so this is the only thing left carrying the texture -- and one
+  // dominant cell size at +/-28% reads as patches of ground laid out on a
+  // grid rather than as mottling in it.
+  let mid  = fbm2(q * 26.0, 3);
   let detail = clamp(1.0 / (1.0 + i.dist * 14.0), 0.0, 1.0);
-  albedo *= 0.72 + 0.56 * mix(mid, fine, detail);
+  // The blade-scale octave is gone past about fifteen centimetres, and the
+  // ground past fifteen centimetres is most of the frame. Reading it anyway
+  // and then multiplying it by a zero `detail` cost a lattice fetch over every
+  // pixel of the field for a contribution of nothing.
+  var fine = 0.0;
+  if (detail > 0.004) { fine = valueNoise2(q * 210.0); }
+  albedo *= 0.82 + 0.36 * mix(mid, fine, detail);
 
-  // Litter and thatch: the dead layer under any real sward.
-  let litter = smoothstep(0.62, 0.86, mid) * (0.35 + 0.65 * hab.b);
-  albedo = mix(albedo, vec3f(0.135, 0.098, 0.045), litter * 0.5);
+  // Litter and thatch: the dead layer under any real sward. Softened at both
+  // ends for the same reason -- a tight threshold on a noise field turns its
+  // cells into hard-edged blotches, and on the bare, hard-grazed ground where
+  // this term is strongest there is no sward left to hide them.
+  let litter = smoothstep(0.48, 1.0, mid) * (0.35 + 0.65 * hab.b);
+  albedo = mix(albedo, vec3f(0.135, 0.098, 0.045), litter * 0.32);
 
   // A sward is a mat of near-vertical blades, so it is far darker than a flat
   // Lambertian surface of the same pigment: light that enters gets trapped.
   // Tilting the shading normal is the cheap stand-in for that, and it is why
-  // grass fields do not read as flat green paper. One hash rather than a noise
-  // sum -- at this frequency the difference is below a pixel anyway.
-  let jitter = hash33(vec3f(floor(i.world.xz * 30.0), 7.0)) - vec3f(0.5);
-  let N = normalize(vec3f(jitter.x * 0.55, 1.0, jitter.z * 0.55));
+  // a grass field does not read as flat green paper.
+  //
+  // It is a stand-in for blades that are NOT DRAWN, so it fades in on exactly
+  // the schedule the real ones fade out. grass.wgsl lays blades over the first
+  // metre or so and thins them by the lens past that; inside the first metre
+  // this term is both redundant and ruinous, because a thirty-degree swing of
+  // the normal at one spatial frequency under a low sun is not a sward, it is
+  // a chequerboard of light and dark cells -- and at bee height those cells
+  // are a centimetre across rather than the sub-pixel they were designed as.
+  // (Interpolated noise rather than the per-cell hash it used to be, which had
+  // the same problem twice as badly: constant normal per cell, hard edges.)
+  //
+  // The other half of that bargain is that inside 35cm the amplitude is zero,
+  // so the two noise fetches are skipped there entirely -- and inside 35cm is
+  // exactly where the near ground fills the frame.
+  let tiltAmp = 0.55 * smoothstep(0.35, 1.6, i.dist);
+  var tilt = vec2f(0.0);
+  if (tiltAmp > 0.002) {
+    // The two components sample the lattice through a quarter turn from each
+    // other, not merely at a translated origin: value noise is periodic in its
+    // own grid, so two offsets of the same field give one field and a copy of
+    // it, and a normal built from those tilts along one diagonal everywhere.
+    // (The 3D form this replaced got the same thing for free by taking two
+    // different z-planes.)
+    let qa = q * 95.0 + vec2f(11.3, 4.7);
+    let qb = vec2f(-q.y, q.x) * 95.0 + vec2f(23.9, 61.1);
+    tilt = (vec2f(valueNoise2(qa), valueNoise2(qb)) - 0.5) * 2.0;
+  }
+  let N = normalize(vec3f(tilt.x * tiltAmp, 1.0, tilt.y * tiltAmp));
   let ndl = max(0.0, dot(N, L));
   let shade = shadowFactor(i.world, dot(N, L));
   var color = albedo * G.sunColor.rgb * G.sunColor.w * ndl * shade / PI;
   color += albedo * skyAmbient(N) * mix(0.55, 1.0, smoothstep(0.0, 0.5, hab.r));
 
-  return vec4f(aerial(color, i.viewZ, -V, L), 1.0);
+  return vec4f(aerial(landingMark(color, i.world), i.viewZ, -V, L), 1.0);
 }

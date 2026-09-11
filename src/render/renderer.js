@@ -14,6 +14,7 @@
 // three index buffers. See render/lod.js for how that list is chosen.
 
 import { createBuffer, makeMipGenerator, mipCount, makeShaderLoader } from '../gpu/device.js';
+import { Profiler } from '../gpu/profiler.js';
 import { VERTEX_STRIDE } from '../geom/mesh.js';
 import * as F from '../geom/flower.js';
 import { SPECIES, headRadius as speciesHeadRadius, rayCount, silhouetteRays }
@@ -21,6 +22,7 @@ import { SPECIES, headRadius as speciesHeadRadius, rayCount, silhouetteRays }
 import { growField, packPlantInstances, bakeHabitatMap } from '../geom/field.js';
 import { growVenation, bakeLeafMaps } from '../geom/venation.js';
 import { buildGrassBladeMesh } from '../geom/grass.js';
+import { buildBeeMesh } from '../geom/bee.js';
 import { BOUNDS } from '../sim/flight.js';
 import { HeadSites, SITE_FLOATS } from '../sim/sites.js';
 import { LodSelector, TIER, VISIBLE_WORDS } from './lod.js';
@@ -33,9 +35,36 @@ import { mat4, lookAt, ortho, multiply, normalize } from './math.js';
 // happens off this ladder: stepping at 1/48 grew the tip's sway by half.
 const REFRESH_LADDER = [1 / 144, 1 / 120, 1 / 90, 1 / 75, 1 / 60];
 
+/**
+ * Colour format for the defocus and bloom chains, which need the alpha channel
+ * -- dof.wgsl packs the signed circle of confusion into it.
+ */
 const HDR_FORMAT = 'rgba16float';
+
+/**
+ * Colour format for the scene itself, chosen at device creation.
+ *
+ * The main pass writes one full-resolution colour attachment and reads it back
+ * twice downstream, and on integrated graphics sharing LPDDR with the CPU that
+ * traffic is the pass, not the shading: an empty main pass at two megapixels
+ * measured nine milliseconds on an Iris Plus 645, all of it clear and store.
+ * rg11b10ufloat halves it. Nothing in the scene needs the alpha -- the two
+ * blended draws use their own SOURCE alpha, which the fragment still produces
+ * -- and a six-bit mantissa on a positive radiance is finer than the eight-bit
+ * sRGB the post chain lands on. rgba16float where the feature is missing.
+ */
+let SCENE_FORMAT = 'rgba16float';
 const DEPTH_FORMAT = 'depth32float';
 const SHADOW_SIZE = 2048;
+
+/**
+ * Baked sky table. Rows are the signed square root of elevation (see skyUv in
+ * common.wgsl), so most of them sit within a few degrees of the horizon where
+ * the gradient is. 512 columns puts an azimuth texel at 0.7 degrees, which is
+ * finer than the Mie forward lobe varies -- and it is rebuilt only when the
+ * sun moves, so the size costs nothing per frame.
+ */
+const SKY_LUT = [512, 256];
 const POLLEN_COUNT = 6000;
 const BLOOM_LEVELS = 6;
 const STEM_NODES = 16;
@@ -48,14 +77,30 @@ const HABITAT_SIZE = 256;
 /** Instance stride the floret draw multiplexes on; must match floret.wgsl. */
 const FLORETS_PER_PLANT = 1024;
 
+/** Floats in one BeeXform; must match the struct in bee.wgsl. */
+const BEE_XFORM_FLOATS = 16;
+
 /**
  * Grass window. The blades are hashed out of a world grid inside a square of
  * cells that follows the camera (see grass.wgsl), so this is the whole cost of
  * ground cover however big the field is: `perCell * across^2` instances, of
  * which the lens-driven thinning in the vertex shader collapses most.
  */
-const GRASS = { cell: 0.055, perCell: 8, across: 45, fade: 1.30 };
+const GRASS = { cell: 0.055, perCell: 18, across: 45, fade: 1.30 };
 const GRASS_CELLS = GRASS.across * GRASS.across;
+
+/**
+ * Every blade grass_cull.wgsl is asked about, at full density. Most of them
+ * fail the lens test and are never appended, which is the whole point -- but
+ * the packed buffer has to be able to hold the case where they all pass.
+ */
+const GRASS_CANDIDATES = GRASS.perCell * GRASS_CELLS;
+
+/** Floats in one Blade; must match the struct in grass_cull.wgsl. */
+const BLADE_FLOATS = 16;
+
+/** Written to the indirect instance count every frame, before the cull. */
+const ZERO_U32 = new Uint32Array([0]);
 
 /**
  * Extinction per metre for the aerial term.
@@ -76,8 +121,8 @@ const G = {
   shL0: 76, shL1y: 80, shL1z: 84, shL1x: 88,
   lens: 92, windParams: 96, state: 100, screen: 104,
   shadowParam: 108, plant: 112, field: 116, hazeSun: 120, hazeAway: 124,
-  proj: 128, post: 132,
-  SIZE_FLOATS: 136,
+  proj: 128, post: 132, mark: 136,
+  SIZE_FLOATS: 140,
 };
 
 const VERTEX_LAYOUT = {
@@ -130,6 +175,47 @@ export class Renderer {
     this.lastSunKey = '';
     this.lodBias = 1.0;
     this.grassDensity = 1.0;
+    // Where the bee is, in its own frame, for the third-person draw. Written
+    // by setBee() every frame; `show` is false in the orbit view, where there
+    // is no bee to be.
+    this.bee = { show: false, data: new Float32Array(BEE_XFORM_FLOATS) };
+    // World radius of the landing ring drawn straight down from the bee, or 0
+    // for no mark at all. Set per frame by main.js, because whether the mark
+    // is wanted is a question about the mode the player is in, not about the
+    // renderer.
+    this.markRadius = 0;
+  }
+
+  /**
+   * Place the bee for this frame.
+   *
+   * A basis, not a matrix: the flight model hands the camera an orthonormal
+   * forward and up already, and deriving a 4x4 from them here would only give
+   * the body a second chance to disagree with the view.
+   *
+   * @param {number[]} pos    world position of the thorax
+   * @param {number[]} fwd    unit, the way the bee faces
+   * @param {number[]} up     unit, the bee's own up (the flower's normal when
+   *                          it is crawling, world up when it is flying)
+   */
+  setBee(pos, fwd, up, scale = 1) {
+    const d = this.bee.data;
+    const f = normalize([fwd[0], fwd[1], fwd[2]]);
+    // Re-orthogonalise against the forward, so a caller that hands over an up
+    // that is merely close cannot shear the bee.
+    const uDot = up[0] * f[0] + up[1] * f[1] + up[2] * f[2];
+    let u = normalize([up[0] - f[0] * uDot, up[1] - f[1] * uDot, up[2] - f[2] * uDot]);
+    if (!Number.isFinite(u[0])) u = Math.abs(f[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+    const r = [u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]];
+    d.set([pos[0], pos[1], pos[2], scale], 0);
+    d.set([r[0], r[1], r[2], 0], 4);
+    d.set([u[0], u[1], u[2], 0], 8);
+    // fwd.w is a per-frame seed for the wing stipple: a fixed screen-space
+    // hash would freeze the same dither pattern onto the wings and read as a
+    // texture rather than as blur.
+    d.set([f[0], f[1], f[2], (this.frameId % 1024) * 7.13], 12);
+    this.bee.show = true;
+    this.device.queue.writeBuffer(this.beeBuffer, 0, d);
   }
 
   static async create(device, context, format, canvas) {
@@ -140,14 +226,26 @@ export class Renderer {
 
   async init() {
     const { device } = this;
+    if (device.features.has('rg11b10ufloat-renderable')) SCENE_FORMAT = 'rg11b10ufloat';
     const load = await makeShaderLoader();
     const names = ['wind.wgsl', 'sky.wgsl', 'shadow.wgsl', 'plant.wgsl', 'floret.wgsl',
                    'pollen_sim.wgsl', 'pollen_draw.wgsl', 'dof.wgsl', 'bloom.wgsl',
-                   'post.wgsl', 'grass.wgsl', 'ground.wgsl', 'impostor.wgsl'];
+                   'post.wgsl', 'grass.wgsl', 'ground.wgsl', 'impostor.wgsl',
+                   'bee.wgsl', 'sky_lut.wgsl', 'grass_cull.wgsl'];
     const sources = await Promise.all(names.map((n) => load(n)));
     const mod = (code, label) => device.createShaderModule({ code, label });
     const M = Object.fromEntries(names.map((n, i) =>
       [n.replace('.wgsl', ''), mod(sources[i], n)]));
+
+    // Every pass the frame encodes, in order, so the profiler can name what it
+    // is timing. Bloom is one label per level because the levels differ by 4x
+    // in area and a single number would hide which end costs anything.
+    this.profiler = new Profiler(device, [
+      'sim', 'skyLut', 'shadow', 'main', 'dofPrepare', 'dofGather',
+      ...Array.from({ length: BLOOM_LEVELS }, (_, i) => `bloomDown${i}`),
+      ...Array.from({ length: BLOOM_LEVELS - 1 }, (_, i) => `bloomUp${i + 1}`),
+      'post',
+    ]);
 
     this.buildGeometry();
     this.buildTextures();
@@ -217,7 +315,34 @@ export class Renderer {
     }
     this.floretBuffer = createBuffer(device, allFlorets, GPUBufferUsage.STORAGE, 'florets');
     this.parts = { floret: upload(F.buildDiscFloretMesh(), 'floret'),
-                   grass: upload(buildGrassBladeMesh(), 'grass') };
+                   grass: upload(buildGrassBladeMesh(), 'grass'),
+                   bee: upload(buildBeeMesh(), 'bee') };
+
+    // --- the sward ---------------------------------------------------------
+    // grass_cull.wgsl fills this every frame and the draw reads it through an
+    // indirect instance count, so nothing on the CPU ever learns how many
+    // blades there were.
+    this.bladeBuffer = device.createBuffer({
+      label: 'blades',
+      size: GRASS_CANDIDATES * BLADE_FLOATS * 4,
+      usage: GPUBufferUsage.STORAGE,
+    });
+    // drawIndexedIndirect arguments: index count, instance count, first index,
+    // base vertex, first instance. Only the instance count moves, and only the
+    // GPU moves it; the rest is written once here.
+    this.grassDrawBuffer = device.createBuffer({
+      label: 'grassDraw',
+      size: 5 * 4,
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.INDIRECT | GPUBufferUsage.COPY_DST,
+    });
+    device.queue.writeBuffer(this.grassDrawBuffer, 0, new Uint32Array([
+      this.parts.grass.lods[0].count, 0, 0, 0, 0,
+    ]));
+    this.grassCullParams = device.createBuffer({
+      label: 'grassCull', size: 16,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.grassCandidateWords = new Uint32Array(4);
 
     // --- the field ---------------------------------------------------------
     this.field = growField({ min: BOUNDS.min, max: BOUNDS.max }, { target: PLANT_TARGET });
@@ -369,6 +494,19 @@ export class Renderer {
       maxAnisotropy: 8,
     });
     this.shadowSampler = device.createSampler({ compare: 'less' });
+    // Repeat in u so the lat-long seam at due-west interpolates across the
+    // wrap instead of clamping to a stripe of one column.
+    this.skySampler = device.createSampler({
+      magFilter: 'linear', minFilter: 'linear',
+      addressModeU: 'repeat', addressModeV: 'clamp-to-edge',
+    });
+    this.skyLutTexture = device.createTexture({
+      label: 'skyLut', size: SKY_LUT, format: SCENE_FORMAT,
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.skyLutView = this.skyLutTexture.createView();
+    // Nothing in it yet, and the first frame reads it.
+    this.skyLutDirty = true;
 
     this.shadowTexture = device.createTexture({
       label: 'shadowMap', size: [SHADOW_SIZE, SHADOW_SIZE], format: DEPTH_FORMAT,
@@ -387,6 +525,10 @@ export class Renderer {
 
     this.globalsBuffer = device.createBuffer({
       label: 'globals', size: G.SIZE_FLOATS * 4,
+      usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+    this.beeBuffer = device.createBuffer({
+      label: 'bee', size: BEE_XFORM_FLOATS * 4,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
@@ -430,8 +572,10 @@ export class Renderer {
         { binding: 0, visibility: VFC, buffer: { type: 'uniform' } },
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'depth' } },
         { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'comparison' } },
-        { binding: 3, visibility: VF, sampler: { type: 'filtering' } },
-        { binding: 4, visibility: VF, texture: { sampleType: 'float' } },
+        // Compute too: grass_cull.wgsl reads the habitat map to decide how
+        // vigorous the sward is where a blade would stand.
+        { binding: 3, visibility: VFC, sampler: { type: 'filtering' } },
+        { binding: 4, visibility: VFC, texture: { sampleType: 'float' } },
       ],
     });
     // Everything that draws a plant binds exactly this: the solved chains, the
@@ -454,6 +598,27 @@ export class Renderer {
     });
     this.bglFloretDisc = device.createBindGroupLayout({
       label: 'floretDisc',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
+      ],
+    });
+    this.bglSky = device.createBindGroupLayout({
+      label: 'sky',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      ],
+    });
+    this.bglGrassCull = device.createBindGroupLayout({
+      label: 'grassCull',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+        { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+      ],
+    });
+    this.bglGrass = device.createBindGroupLayout({
+      label: 'grass',
       entries: [
         { binding: 0, visibility: GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' } },
       ],
@@ -489,6 +654,17 @@ export class Renderer {
         { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       ],
     });
+    // One bee, one uniform. It is its own group rather than a slot in the
+    // globals because nothing else in the frame has any business knowing
+    // where the bee is -- and because the globals' layout is checked field by
+    // field offline, which a per-frame guest would only make noisier.
+    this.bglBee = device.createBindGroupLayout({
+      label: 'bee',
+      entries: [
+        { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT,
+          buffer: { type: 'uniform' } },
+      ],
+    });
     this.bglPost = device.createBindGroupLayout({
       label: 'post',
       entries: [
@@ -507,7 +683,7 @@ export class Renderer {
     const opaque = (label, module, layout) => device.createRenderPipeline({
       label, layout,
       vertex: { module, entryPoint: 'vs', buffers: [VERTEX_LAYOUT] },
-      fragment: { module, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+      fragment: { module, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
       primitive: { topology: 'triangle-list' },
       depthStencil: depthOn,
     });
@@ -517,6 +693,11 @@ export class Renderer {
         label: 'wind',
         layout: pl(this.bgl0, this.bglWind),
         compute: { module: M.wind, entryPoint: 'solveStem' },
+      }),
+      grassCull: device.createComputePipeline({
+        label: 'grassCull',
+        layout: pl(this.bgl0, this.bglGrassCull),
+        compute: { module: M.grass_cull, entryPoint: 'cull' },
       }),
       pollenUpdate: device.createComputePipeline({
         label: 'pollenUpdate',
@@ -530,25 +711,39 @@ export class Renderer {
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
       }),
+      skyLut: device.createRenderPipeline({
+        label: 'skyLut',
+        layout: pl(this.bgl0),
+        vertex: { module: M.sky_lut, entryPoint: 'vs' },
+        fragment: { module: M.sky_lut, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
+        primitive: { topology: 'triangle-list' },
+      }),
       sky: device.createRenderPipeline({
         label: 'sky',
-        layout: pl(this.bgl0),
+        layout: pl(this.bgl0, this.bglSky),
         vertex: { module: M.sky, entryPoint: 'vs' },
-        fragment: { module: M.sky, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+        fragment: { module: M.sky, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
         primitive: { topology: 'triangle-list' },
-        // Drawn first, filling the frame; never occludes the geometry over it.
-        depthStencil: { format: DEPTH_FORMAT, depthWriteEnabled: false, depthCompare: 'always' },
+        // Drawn AFTER the opaque geometry, at the far plane, with the test on
+        // and the write off: the depth buffer is still 1.0 only where nothing
+        // covered the background, so early-z throws the rest away before the
+        // fragment runs. It used to be 'always' and drawn first, which meant
+        // shading a whole screen of sky and then painting over it.
+        depthStencil: { format: DEPTH_FORMAT, depthWriteEnabled: false, depthCompare: 'less-equal' },
       }),
       ground: device.createRenderPipeline({
         label: 'ground',
         layout: pl(this.bgl0),
         vertex: { module: M.ground, entryPoint: 'vs' },
-        fragment: { module: M.ground, entryPoint: 'fs', targets: [{ format: HDR_FORMAT }] },
+        fragment: { module: M.ground, entryPoint: 'fs', targets: [{ format: SCENE_FORMAT }] },
         primitive: { topology: 'triangle-list' },
         depthStencil: depthOn,
       }),
       plant: opaque('plant', M.plant, pl(this.bgl0, this.bglScene, this.bglPlantTex)),
-      grass: opaque('grass', M.grass, pl(this.bgl0)),
+      // No culling: the wing arcs are single-sided sheets and the legs are
+      // thin enough that a back face is worth having.
+      bee: opaque('bee', M.bee, pl(this.bgl0, this.bglBee)),
+      grass: opaque('grass', M.grass, pl(this.bgl0, this.bglGrass)),
       floret: opaque('floret', M.floret, pl(this.bgl0, this.bglScene, this.bglFloretDisc)),
       impostor: device.createRenderPipeline({
         label: 'impostor',
@@ -557,7 +752,7 @@ export class Renderer {
         fragment: {
           module: M.impostor, entryPoint: 'fs',
           targets: [{
-            format: HDR_FORMAT,
+            format: SCENE_FORMAT,
             // Premultiplied over. The far field is soft-edged by definition,
             // so it has to blend; the draw list is sorted back to front and
             // depth is still written, so the defocus pass reads the head's own
@@ -578,7 +773,7 @@ export class Renderer {
         fragment: {
           module: M.pollen_draw, entryPoint: 'fs',
           targets: [{
-            format: HDR_FORMAT,
+            format: SCENE_FORMAT,
             // Premultiplied additive: motes only ever add light.
             blend: {
               color: { srcFactor: 'src-alpha', dstFactor: 'one', operation: 'add' },
@@ -661,6 +856,29 @@ export class Renderer {
         { binding: 2, resource: { buffer: this.visibleBuffer } },
       ],
     });
+    this.bgBee = device.createBindGroup({
+      label: 'bee', layout: this.bglBee,
+      entries: [{ binding: 0, resource: { buffer: this.beeBuffer } }],
+    });
+    this.bgGrassCull = device.createBindGroup({
+      layout: this.bglGrassCull,
+      entries: [
+        { binding: 0, resource: { buffer: this.bladeBuffer } },
+        { binding: 1, resource: { buffer: this.grassDrawBuffer } },
+        { binding: 2, resource: { buffer: this.grassCullParams } },
+      ],
+    });
+    this.bgGrass = device.createBindGroup({
+      layout: this.bglGrass,
+      entries: [{ binding: 0, resource: { buffer: this.bladeBuffer } }],
+    });
+    this.bgSky = device.createBindGroup({
+      layout: this.bglSky,
+      entries: [
+        { binding: 0, resource: this.skyLutView },
+        { binding: 1, resource: this.skySampler },
+      ],
+    });
     this.bgFloretDisc = device.createBindGroup({
       layout: this.bglFloretDisc,
       entries: [{ binding: 0, resource: { buffer: this.floretBuffer } }],
@@ -710,7 +928,7 @@ export class Renderer {
 
     const target = GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING;
     this.hdrTexture = device.createTexture({
-      label: 'hdr', size: [w, h], format: HDR_FORMAT,
+      label: 'hdr', size: [w, h], format: SCENE_FORMAT,
       usage: target | GPUTextureUsage.COPY_SRC,
     });
     this.depthTexture = device.createTexture({ label: 'depth', size: [w, h], format: DEPTH_FORMAT, usage: target });
@@ -787,6 +1005,7 @@ export class Renderer {
     const key = `${sunDir.map((v) => v.toFixed(2)).join(',')}|${intensity.toFixed(1)}`;
     if (key === this.lastSunKey) return;
     this.lastSunKey = key;
+    this.skyLutDirty = true;
     this.sunSH = shToIrradiance(projectSkySH(sunDir, 512));
     // Horizon radiance looking into the sun and away from it. Precomputed on
     // the same CPU atmosphere the sky shader mirrors, because evaluating it
@@ -878,7 +1097,9 @@ export class Renderer {
 
     g.set([camera.focusDistance, camera.fNumber, camera.focalLength, SENSOR_HEIGHT], G.lens);
     g.set([state.wind, this.simTime, Math.cos(state.windDir), Math.sin(state.windDir)], G.windParams);
-    g.set([state.bloom, state.floretFront, state.exposure, this.solveStep], G.state);
+    // state.y is spare: it carried the panel's global maturation shift, which
+    // put every disc in the meadow through its season together.
+    g.set([state.bloom, 0, state.exposure, this.solveStep], G.state);
     g.set([this.width, this.height, 1 / this.width, 1 / this.height], G.screen);
     g.set([HALF, FAR - NEAR, 0, 0.0016], G.shadowParam);
     g.set([this.plantCount, FIELD_HALF, this.lodBias, state.debugView ?? 0], G.plant);
@@ -889,6 +1110,11 @@ export class Renderer {
     const { A, B } = camera.depthParams;
     g.set([camera.near, camera.far, A, B], G.proj);
     g.set([state.bloomStrength, state.grain, state.chromatic, state.vignette], G.post);
+    // The down-shadow rides on the bee's own position, so there is one place
+    // that decides where the bee is; `markRadius` only says how big to draw
+    // it, and zero turns it off. See landingMark() in common.wgsl.
+    const b = this.bee;
+    g.set([b.data[0], b.data[1], b.data[2], b.show ? this.markRadius : 0], G.mark);
 
     this.device.queue.writeBuffer(this.globalsBuffer, 0, g);
   }
@@ -925,12 +1151,27 @@ export class Renderer {
       device.queue.writeBuffer(this.visibleBuffer, 0, lod.buffer, 0, lod.byteLength);
     }
 
+    // --- the sward's draw list --------------------------------------------
+    // Blade-major in the candidate index (see grass_cull.wgsl), so trimming
+    // the count lifts whole layers off the sward evenly rather than cutting
+    // the window in half. The instance count goes back to zero here because
+    // the cull only ever adds to it.
+    const layers = Math.max(0, Math.round(GRASS.perCell * this.grassDensity));
+    const grassCandidates = (this.skip?.grass) ? 0 : layers * GRASS_CELLS;
+    if (grassCandidates > 0) {
+      this.grassCandidateWords[0] = grassCandidates;
+      device.queue.writeBuffer(this.grassCullParams, 0, this.grassCandidateWords);
+      device.queue.writeBuffer(this.grassDrawBuffer, 4, ZERO_U32);
+    }
+
     const encoder = device.createCommandEncoder({ label: 'frame' });
     const P = this.pipelines;
 
     // --- simulation -------------------------------------------------------
     {
-      const pass = encoder.beginComputePass({ label: 'sim' });
+      const pass = encoder.beginComputePass({
+        label: 'sim', timestampWrites: this.profiler.writes('sim'),
+      });
       pass.setBindGroup(0, this.bg0Main);
       pass.setPipeline(P.wind);
       pass.setBindGroup(1, this.bgWind);
@@ -939,6 +1180,31 @@ export class Renderer {
       pass.setPipeline(P.pollenUpdate);
       pass.setBindGroup(1, this.bgPollenCompute);
       pass.dispatchWorkgroups(Math.ceil(POLLEN_COUNT / 64));
+      if (grassCandidates > 0) {
+        pass.setPipeline(P.grassCull);
+        pass.setBindGroup(1, this.bgGrassCull);
+        pass.dispatchWorkgroups(Math.ceil(grassCandidates / 64));
+      }
+      pass.end();
+    }
+
+    // --- sky table --------------------------------------------------------
+    // Only when the sun has actually moved. See sky_lut.wgsl: this is the
+    // whole atmosphere raymarch, done once for every direction instead of
+    // once for every pixel.
+    if (this.skyLutDirty) {
+      this.skyLutDirty = false;
+      const pass = encoder.beginRenderPass({
+        label: 'skyLut',
+        timestampWrites: this.profiler.writes('skyLut'),
+        colorAttachments: [{
+          view: this.skyLutView, loadOp: 'clear', storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      pass.setPipeline(P.skyLut);
+      pass.setBindGroup(0, this.bg0Main);
+      pass.draw(3);
       pass.end();
     }
 
@@ -949,6 +1215,7 @@ export class Renderer {
     {
       const pass = encoder.beginRenderPass({
         label: 'shadow',
+        timestampWrites: this.profiler.writes('shadow'),
         colorAttachments: [],
         depthStencilAttachment: {
           view: this.shadowTexture.createView(),
@@ -971,6 +1238,7 @@ export class Renderer {
     {
       const pass = encoder.beginRenderPass({
         label: 'main',
+        timestampWrites: this.profiler.writes('main'),
         colorAttachments: [{
           view: this.hdrTexture.createView(),
           loadOp: 'clear', storeOp: 'store', clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -982,29 +1250,22 @@ export class Renderer {
       });
       pass.setBindGroup(0, this.bg0Main);
 
-      pass.setPipeline(P.sky);
-      pass.draw(3);
+      // Profiling hook: `renderer.skip = { grass: 1 }` from the console drops
+      // that draw, so the profiler's `main` figure can be split by subtraction.
+      // Keys: plants, florets, grass, ground, sky, impostors, pollen.
+      const skip = this.skip ?? {};
 
-      // Ground and grass first: they are the backdrop, and drawing the near
-      // geometry after them lets early-z reject most of the sward behind it.
-      pass.setPipeline(P.ground);
-      pass.draw(GROUND_VERTS);
-
-      // Grass is blade-major in the instance index (see grass.wgsl), so
-      // trimming the instance count lifts whole layers off the sward evenly
-      // rather than cutting the window in half.
-      const layers = Math.round(GRASS.perCell * this.grassDensity);
-      if (layers > 0) {
-        pass.setPipeline(P.grass);
-        pass.setVertexBuffer(0, this.parts.grass.vertex);
-        const blade = this.parts.grass.lods[0];
-        pass.setIndexBuffer(blade.index, blade.indexFormat);
-        pass.drawIndexed(blade.count, layers * GRASS_CELLS);
-      }
-
+      // Opaque geometry runs NEAR TO FAR -- plants, then the sward, then the
+      // ground, then the sky. Every one of these shaders costs tens of ALU and
+      // a shadow kernel per fragment, so what matters is not how many
+      // fragments are rasterised but how many are SHADED, and early-z only
+      // discards what is drawn after the thing in front of it. Drawn the other
+      // way round (which is how this used to read) the ground shaded the whole
+      // frame, the sward shaded most of it again, and the plants shaded it a
+      // third time.
       pass.setPipeline(P.plant);
       pass.setBindGroup(1, this.bgScene);
-      for (const { key, material: mat } of PARTS) {
+      for (const { key, material: mat } of (skip.plants ? [] : PARTS)) {
         pass.setBindGroup(2, this.bgMaterials[mat]);
         for (const run of lod.runs) triangles += this.drawRun(pass, run, key);
       }
@@ -1012,7 +1273,7 @@ export class Renderer {
       // Disc florets, for the handful of plants at the finest tier. One draw
       // per plant, because every species has its own floret count and its own
       // block of the shared Vogel table.
-      if (lod.floretSlots.length > 0) {
+      if (lod.floretSlots.length > 0 && !skip.florets) {
         pass.setPipeline(P.floret);
         pass.setBindGroup(1, this.bgScene);
         pass.setBindGroup(2, this.bgFloretDisc);
@@ -1026,20 +1287,63 @@ export class Renderer {
         }
       }
 
+      // The bee, still in the near-to-far run: in the chase view it is the
+      // closest thing in the frame and it puts a solid body over a good part
+      // of the sward. There is exactly one, so there is nothing to sort and no
+      // instancing: one draw of about 2500 triangles, at any distance.
+      if (this.bee.show) {
+        pass.setPipeline(P.bee);
+        pass.setBindGroup(1, this.bgBee);
+        const mesh = this.parts.bee.lods[0];
+        pass.setVertexBuffer(0, this.parts.bee.vertex);
+        pass.setIndexBuffer(mesh.index, mesh.indexFormat);
+        pass.drawIndexed(mesh.count);
+        triangles += mesh.count / 3;
+      }
+
+      // Grass is blade-major in the instance index (see grass.wgsl), so
+      // trimming the instance count lifts whole layers off the sward evenly
+      // rather than cutting the window in half.
+      if (grassCandidates > 0) {
+        pass.setPipeline(P.grass);
+        pass.setBindGroup(1, this.bgGrass);
+        pass.setVertexBuffer(0, this.parts.grass.vertex);
+        const blade = this.parts.grass.lods[0];
+        pass.setIndexBuffer(blade.index, blade.indexFormat);
+        // The instance count is whatever the cull appended, and it is never
+        // read back: the CPU does not know how much sward there is this frame
+        // and does not need to.
+        pass.drawIndexedIndirect(this.grassDrawBuffer, 0);
+      }
+
+      // The ground, under everything above. Its fragment shader is one of the
+      // two most expensive in the frame, so it wants every blade and every
+      // petal already in the depth buffer before it starts.
+      if (!skip.ground) { pass.setPipeline(P.ground); pass.draw(GROUND_VERTS); }
+
+      // And the sky behind that, depth-tested against all of it.
+      if (!skip.sky) {
+        pass.setPipeline(P.sky);
+        pass.setBindGroup(1, this.bgSky);
+        pass.draw(3);
+      }
+
       // The far field, back to front. 18 vertices, not 6: a species with no
       // ray whorl (clover) draws three leaf-tinted blobs per plant instead of
       // one flower-tinted one -- see impostor.wgsl. Every other species just
       // collapses the spare two to degenerate triangles.
-      if (lod.impostor.count > 0) {
+      if (lod.impostor.count > 0 && !skip.impostors) {
         pass.setPipeline(P.impostor);
         pass.setBindGroup(1, this.bgScene);
         pass.draw(18, lod.impostor.count, 0, lod.impostor.base);
         triangles += 2 * lod.impostor.count;
       }
 
-      pass.setPipeline(P.pollen);
-      pass.setBindGroup(1, this.bgPollenDraw);
-      pass.draw(6, POLLEN_COUNT);
+      if (!skip.pollen) {
+        pass.setPipeline(P.pollen);
+        pass.setBindGroup(1, this.bgPollenDraw);
+        pass.draw(6, POLLEN_COUNT);
+      }
       pass.end();
     }
     this.triangles = triangles;
@@ -1048,6 +1352,7 @@ export class Renderer {
     const fullscreen = (label, pipeline, bind, view, blend = false) => {
       const pass = encoder.beginRenderPass({
         label,
+        timestampWrites: this.profiler.writes(label),
         colorAttachments: [{
           view, loadOp: blend ? 'load' : 'clear', storeOp: 'store',
           clearValue: { r: 0, g: 0, b: 0, a: 0 },
@@ -1085,7 +1390,9 @@ export class Renderer {
       this.landingSkips++;
     }
 
+    this.profiler.resolve(encoder);
     device.queue.submit([encoder.finish()]);
+    this.profiler.read();
 
     if (slot !== undefined) {
       const buf = this.landingStaging[slot];

@@ -14,7 +14,7 @@ struct Globals {
   shL1x       : vec4f,
   lens        : vec4f,   // focusDistance, fNumber, focalLength, sensorHeight
   windParams  : vec4f,   // strength, simTime, dirX, dirZ
-  state       : vec4f,   // bloom, floretFront, exposure, solveStep
+  state       : vec4f,   // bloom, unused, exposure, solveStep
   screen      : vec4f,   // w, h, 1/w, 1/h
   shadowParam : vec4f,   // orthoHalfWidth, depthRange, unused, bias
   plant       : vec4f,   // plantCount, fieldHalfExtent, lodSharpBias, debugView
@@ -23,6 +23,7 @@ struct Globals {
   hazeAway    : vec4f,   // horizon radiance away from it
   proj        : vec4f,   // near, far, A, B  (ndcZ = A + B/viewDist)
   post        : vec4f,   // bloomStrength, grainAmount, chromatic, vignette
+  mark        : vec4f,   // bee world position, w = landing ring radius (0 = off)
 }
 
 @group(0) @binding(0) var<uniform> G : Globals;
@@ -77,6 +78,36 @@ fn valueNoise3(p: vec3f) -> f32 {
     }
   }
   return acc;
+}
+
+/**
+ * The same lattice noise in two dimensions.
+ *
+ * Every noise the ground shades itself with is sampled on a horizontal plane,
+ * i.e. with a CONSTANT second coordinate. Fed to valueNoise3 that is eight
+ * corners of which four carry zero weight, and eight hash33 calls where four
+ * would do -- and the ground evaluates six of these per fragment, so it is the
+ * single most-executed block in the frame after the shadow taps.
+ */
+fn valueNoise2(p: vec2f) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let u = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  let a = hash21(i);
+  let b = hash21(i + vec2f(1.0, 0.0));
+  let c = hash21(i + vec2f(0.0, 1.0));
+  let d = hash21(i + vec2f(1.0, 1.0));
+  return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+
+fn fbm2(p: vec2f, octaves: i32) -> f32 {
+  var sum = 0.0; var amp = 0.5; var freq = 1.0; var norm = 0.0;
+  for (var i = 0; i < octaves; i++) {
+    sum += amp * valueNoise2(p * freq);
+    norm += amp;
+    amp *= 0.5; freq *= 2.03;
+  }
+  return sum / norm;
 }
 
 fn fbm3(p: vec3f, octaves: i32) -> f32 {
@@ -167,6 +198,32 @@ fn skyRadiance(dir: vec3f, sunDir: vec3f) -> vec3f {
 }
 
 /**
+ * Lat-long parameterisation of the sky, and its inverse.
+ *
+ * Elevation is stored as the SIGNED SQUARE ROOT of dir.y rather than as the
+ * angle, which puts most of the rows within a few degrees of the horizon --
+ * where the whole colour gradient of a sky lives, and where a linear or
+ * equal-angle map bands visibly. Azimuth is plain, and the u seam is left to
+ * the sampler's repeat mode.
+ *
+ * The pair has to be exact inverses: sky.wgsl looks a direction up in a table
+ * that sky_lut.wgsl filled by walking the same texels the other way.
+ */
+fn skyUv(dir: vec3f) -> vec2f {
+  let u = atan2(dir.z, dir.x) / (2.0 * PI) + 0.5;
+  let y = clamp(dir.y, -1.0, 1.0);
+  return vec2f(u, 0.5 - 0.5 * sign(y) * sqrt(abs(y)));
+}
+
+fn skyDirOf(uv: vec2f) -> vec3f {
+  let a = (uv.x - 0.5) * 2.0 * PI;
+  let t = 1.0 - 2.0 * uv.y;
+  let y = sign(t) * t * t;
+  let r = sqrt(max(0.0, 1.0 - y * y));
+  return vec3f(cos(a) * r, y, sin(a) * r);
+}
+
+/**
  * Ambient irradiance from the sky, reconstructed from band-0/1 SH.
  *
  * The stored coefficients are cosine-convolved radiance projections; turning
@@ -182,6 +239,27 @@ fn skyAmbient(n: vec3f) -> vec3f {
   let c = G.shL0.rgb * Y00
         + (G.shL1y.rgb * n.y + G.shL1z.rgb * n.z + G.shL1x.rgb * n.x) * Y1;
   return max(c, vec3f(0.0)) / PI;
+}
+
+/**
+ * Bend a texture coordinate so hardware bilinear behaves like a quintic.
+ *
+ * Bilinear interpolation is C0: its derivative jumps at every texel boundary,
+ * and over a broad, slowly-varying field sampled at close range that shows up
+ * as a quilt of texel-sized diamonds. The habitat map is 3.5 metres across at
+ * 256 texels, so a texel is 27mm -- which is enormous from four centimetres
+ * up, and was drawing a lattice of soft squares across the ground wherever the
+ * sward thinned enough to see it. Warping the fractional part by the same
+ * quintic value noise uses makes the hardware's own lerp land on a curve whose
+ * first and second derivatives are continuous, for five instructions and no
+ * extra taps.
+ */
+fn smoothTexel(uv: vec2f, size: vec2f) -> vec2f {
+  let p = uv * size - 0.5;
+  let i = floor(p);
+  let f = p - i;
+  let w = f * f * f * (f * (f * 6.0 - 15.0) + 10.0);
+  return (i + 0.5 + w) / size;
 }
 
 /**
@@ -225,7 +303,9 @@ fn windAt(p: vec3f, t: f32) -> vec3f {
 fn habitatAt(xz: vec2f) -> vec3f {
   // r = moisture, g = exposure, b = grazing pressure.
   let uv = xz / (2.0 * max(1e-3, G.plant.y)) + vec2f(0.5);
-  return textureSampleLevel(habitatMap, linearSamp, clamp(uv, vec2f(0.001), vec2f(0.999)), 0.0).rgb;
+  let smoothed = smoothTexel(clamp(uv, vec2f(0.001), vec2f(0.999)),
+                             vec2f(textureDimensions(habitatMap)));
+  return textureSampleLevel(habitatMap, linearSamp, smoothed, 0.0).rgb;
 }
 
 fn windAtCheap(p: vec3f, t: f32) -> vec3f {
@@ -285,11 +365,17 @@ fn shadowFactor(worldPos: vec3f, ndl: f32) -> f32 {
   // textureLoad, not textureSampleLevel: sampling a depth texture needs a
   // non-filtering sampler, and the only one bound here filters. Point sampling
   // is what a blocker search wants anyway.
+  //
+  // Eight taps, not twelve. This estimate feeds one number -- the mean
+  // occluder distance -- which then goes through a tan() of a quarter of a
+  // degree; four extra samples move the penumbra width by well under a texel,
+  // and this kernel runs on every lit fragment of the ground, the sward, every
+  // petal and the bee, so it is the most-executed loop in the frame.
   let searchRadius = 7.0 * texel.x;
   var blockerDepth = 0.0;
   var blockers = 0.0;
-  for (var i = 0u; i < 12u; i++) {
-    let o = vogelDisk(i, 12u, phi) * searchRadius;
+  for (var i = 0u; i < 8u; i++) {
+    let o = vogelDisk(i, 8u, phi) * searchRadius;
     let c = vec2i((uv + o) * dims);
     let cc = clamp(c, vec2i(0), vec2i(dims) - vec2i(1));
     let d = textureLoad(shadowMap, cc, 0);
@@ -304,14 +390,103 @@ fn shadowFactor(worldPos: vec3f, ndl: f32) -> f32 {
   let penumbraWorld = 2.0 * occluderDist * tan(G.sunDir.w);
   let radius = clamp(penumbraWorld / (G.shadowParam.x * 2.0), texel.x, 24.0 * texel.x);
 
+  // Taps scale with the penumbra, because that is the only thing they are
+  // there to resolve. A contact shadow a texel or two wide is a hard edge and
+  // the hardware's own 2x2 comparison filter already softens it; twenty taps
+  // spread over three texels is nineteen samples of the same answer. The wide,
+  // soft end -- a leaf's shadow cast a hand's breadth onto the turf -- is
+  // where the count actually buys smoothness, and it still gets twenty.
+  let wide = radius > 5.0 * texel.x;
+  let taps = select(8u, 20u, wide);
   var sum = 0.0;
-  for (var i = 0u; i < 20u; i++) {
-    let o = vogelDisk(i, 20u, phi) * radius;
+  for (var i = 0u; i < taps; i++) {
+    let o = vogelDisk(i, taps, phi) * radius;
     // Compare*Level*: the plain form demands uniform control flow, which the
     // early-out above already broke.
     sum += textureSampleCompareLevel(shadowMap, shadowCmp, uv + o, depth - bias);
   }
-  return sum / 20.0;
+  return sum / f32(taps);
+}
+
+// ---------------------------------------------------------------------------
+// Landing mark
+//
+// The one thing a bee cannot do by eye in this scene is judge where it is
+// ABOUT to be. The sun's own shadow is no help -- it lies wherever the sun
+// puts it, which at nine in the morning is most of a metre downwind of the
+// bee, and it falls on whatever the sun can see rather than on what is
+// underneath. So this is a second, fictitious shadow cast straight DOWN, and
+// it is the altimeter: a soft blot that spreads and fades as the drop grows,
+// and a hard ring at a fixed world radius that says exactly where the bee's
+// own axis meets the first thing under it.
+//
+// Analytic, and evaluated by every surface that shades itself, which is why it
+// lands correctly on the turf, on a grass blade and on the flower head the bee
+// is descending onto without any of them knowing about it. A projected decal
+// would have had to pick one of those surfaces.
+// ---------------------------------------------------------------------------
+
+/** Fold the down-shadow into a surface's colour. `world` is the fragment. */
+fn landingMark(color: vec3f, world: vec3f) -> vec3f {
+  let R = G.mark.w;
+  if (R <= 0.0) { return color; }
+  // Only what is UNDER the bee. Without this the mark also paints itself onto
+  // the leaf the bee is flying beneath, which reads as a hole in the canopy.
+  let drop = G.mark.y - world.y;
+  if (drop <= 0.001) { return color; }
+
+  let d = length(world.xz - G.mark.xz);
+  if (d > R * 1.75) { return color; }
+
+  // How far up the bee is, as a fraction of the height where the mark stops
+  // meaning anything. A real contact shadow would fade to nothing here; this
+  // one keeps a floor, because "there is ground somewhere below me" is worth
+  // more than physical honesty at the moment you are looking for it.
+  let high = clamp(drop / 0.30, 0.0, 1.0);
+
+  // The blot spreads and softens with the drop -- that spread IS the height
+  // readout, the same way a real penumbra widens with occluder distance. It is
+  // multiplicative, because it is standing in for light that did not arrive.
+  let spread = R * (0.55 + 0.85 * high);
+  let soft = mix(0.18, 0.85, high);
+  let blot = 1.0 - smoothstep(spread * (1.0 - soft), spread, d);
+  var out = color * (1.0 - 0.45 * blot * mix(1.0, 0.5, high));
+
+  // The ring does not move: fixed world radius, so it is a ruler laid on the
+  // surface. Two millimetres up it sits tight around the bee's feet; twenty
+  // centimetres up it is the same circle seen from further away, and closing
+  // the gap between the bee and the middle of it is the landing.
+  //
+  // It also barely dims with height, unlike the blot: a contact shadow that
+  // faded out as the bee climbed would be brightest exactly when the answer is
+  // already obvious and gone by the time the question is worth asking. Height
+  // takes it from the middle of the frame to the bottom edge and shrinks it to
+  // a few pixels, which is quite enough attenuation on its own -- which is
+  // also why the band is nearly a third of the radius wide rather than the
+  // hairline it wants to be up close. A hairline is still a hairline at the
+  // bottom of the frame, and by then it is nothing at all.
+  let t = abs(d - R) / (R * 0.30);
+  let ring = (1.0 - smoothstep(0.35, 1.0, t)) * mix(1.0, 0.85, high);
+
+  // And it REPLACES the radiance rather than tinting it. The two surfaces it
+  // has to read on are the turf, which at this exposure is nearly black, and a
+  // backlit white petal, which is several stops over and clips. Anything added
+  // disappeared into the petal; anything subtracted disappeared into the turf;
+  // and anything that left even a tenth of the petal's own radiance in place
+  // disappeared too, because that tenth is still above the knee of the
+  // tonemap. Setting the ring to a fixed mid-grey takes whichever direction of
+  // contrast the surface underneath has left to give -- it comes up bright on
+  // the sward and dark on the daisy, and is legible on both. 0.52 is roughly
+  // the scene radiance that lands on mid-grey once the exposure and the
+  // tonemap have had it.
+  //
+  // It does cost the ring its shading, which is the honest price of a mark
+  // that is not in the scene in the first place. Everything after this still
+  // applies to it: it hazes with distance and it defocuses with the lens, so
+  // it stays a thing lying on the ground rather than a decal on the glass.
+  let MID = vec3f(0.52, 0.47, 0.31);
+  out = mix(out, MID, ring);
+  return out;
 }
 
 // ---------------------------------------------------------------------------

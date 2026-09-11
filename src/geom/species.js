@@ -117,27 +117,33 @@ const LEAF_SHAPES = {
 
 /**
  * The trefoil every clover entry shares, so the leaf-only form and the
- * flowering minority are recognisably the same plant. Sized to clear short
- * turf rather than hide in it -- see geom/clover.js for the builder.
+ * flowering minority are recognisably the same plant.
+ *
+ * Sized to BLANKET short turf rather than stand over it: white clover is a
+ * stoloniferous mat, and the thing that reads as a clover patch is a closed
+ * sheet of trefoils lying on the sward. The petiole is therefore a fifth of
+ * what it was -- at 45mm each leaf was a little table held up on a stick,
+ * with bare soil visible underneath every one of them -- and the leaflets are
+ * bigger, so neighbours in a patch overlap instead of leaving gaps.
  */
 const CLOVER_LEAF = {
   // Low on the stem: the leaf sways with the plant's near-pinned base rather
   // than its tip, which is most of what keeps it still against the gust a
   // full-height peduncle answers to.
   attachFrac: 0.15,
-  petioleLength: 0.045,
-  petioleRadius: 0.00060,
+  petioleLength: 0.011,
+  petioleRadius: 0.00055,
   // A short stalk of its own before each leaflet's blade starts: three
-  // leaflets this close to round cannot fit 120 degrees apart from a single
-  // shared point without their bases overlapping. Width a little over
-  // length is what makes them squat rather than lance-shaped, and together
-  // with the petiolule gets them close to touching without crossing, even
-  // at the worst of the per-leaflet size and angle jitter.
-  petiolule: 0.0030,
-  leafletLength: 0.013,
-  leafletWidth: 0.0145,
-  fold: 0.32,
-  notch: 0.18,
+  // leaflets this broad cannot fit 120 degrees apart from a single shared
+  // point without their bases overlapping. A real trefoil solves it the same
+  // way, and the gap it opens at the hub is the one every clover leaf has.
+  petiolule: 0.0024,
+  // Obcordate and near round: 17mm long by 15mm wide is a real white clover
+  // leaflet, and three of them make a trefoil about 40mm across.
+  leafletLength: 0.017,
+  leafletWidth: 0.0150,
+  fold: 0.26,
+  notch: 0.10,
 };
 
 /**
@@ -324,8 +330,9 @@ export const SPECIES = [
     // a big trefoil. `cloverBloom` below is the minority that actually
     // flowers; the two share a niche and a dispersal kernel so they read as
     // one patch, not two competing species.
-    abundance: 2.60,
-    head: { discRadius: 0.0012, dome: 0.0010, domeExp: 0.70, floretCount: 12 },
+    abundance: 3.30,
+    head: { discRadius: 0.0012, dome: 0.0010, domeExp: 0.70, floretCount: 12,
+            bractFlare: 1.0 },
     rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
     ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
     tip:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
@@ -333,12 +340,20 @@ export const SPECIES = [
     guide: 0.0,       // no ray whorl to guide a bee into
     tipReach: 0.0,
     chlorophyll: 1.30,
-    cloverLeaf: CLOVER_LEAF,
+    // Attached over half way up its own stubby peduncle rather than near the
+    // base: on a 12mm stem that is what puts the leaf canopy above the bud.
+    cloverLeaf: { ...CLOVER_LEAF, attachFrac: 0.55 },
     // Short AND thick: a stiff, stubby peduncle carrying a bud nobody is
     // meant to notice under the leaf canopy. Thickness matters as much as
     // height here -- see stemWindGain in this file -- because a stem this
     // short on the old thin radius still swayed enough to read as jitter.
-    stem: { height: 0.032, baseRadius: 0.00110, topRadius: 0.00090,
+    //
+    // Shorter than the trefoil's own petiole on purpose. At 32mm the bud
+    // stood clear of every leaf in the patch, and a clover mat grew a forest
+    // of little bare antennae out of it; at 12mm, with the leaf attached
+    // over half way up, the bud sits under the canopy where a non-flowering
+    // clover's does -- which is to say, out of sight.
+    stem: { height: 0.012, baseRadius: 0.00105, topRadius: 0.00085,
             leafScale: 1.0, leanMax: 0.08 },
     // Low bloom AND low front keep the tiny disc folded -- floret.wgsl's
     // openness is bloom times the maturation front -- so what would
@@ -349,19 +364,38 @@ export const SPECIES = [
     niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
     // Clonal spread by stolon, so a patch is dense and packed edge to edge --
     // and a wide patchRadius with a short spacing is what turns "a patch" into
-    // dozens of plants covering a real stretch of ground, not a handful.
-    dispersal: { patchRadius: 0.42, clumpiness: 0.95, spacing: 0.017 },
+    // dozens of plants covering a real stretch of ground, not a handful. The
+    // spacing is well inside one trefoil's 20mm reach on purpose: a clover mat
+    // is leaves overlapping leaves, and any spacing that kept them apart left
+    // soil showing between every plant.
+    dispersal: { patchRadius: 0.46, clumpiness: 0.95, spacing: 0.014 },
   },
   {
     key: 'cloverBloom',
     name: 'White clover (flowering)',
-    abundance: 0.60,
+    // Deliberately scarce. A clover patch is overwhelmingly leaf: a handful of
+    // heads standing over a sheet of trefoils is what the plant looks like,
+    // and at the old abundance the field read as a bed of flowers instead.
+    abundance: 0.20,
     // Not a composite: a clover head is a dense globe of small pea-flower
     // tubes with no ray whorl at all. That happens to be exactly the disc
     // floret this file already builds for every other species, so a "clover"
     // here is just that floret, packed onto a near-spherical dome instead of
     // a flat one, with the ray whorl left empty.
-    head: { discRadius: 0.0078, dome: 0.0072, domeExp: 0.62, floretCount: 260 },
+    // A globe, not a cushion: `dome` equal to the radius and a low exponent
+    // give a near hemisphere, and `bractFlare` of 1 stops the receptacle
+    // running out past the florets into the reflexed involucre every composite
+    // in this file has and a legume has not. That flare, drawn in green and
+    // wider than the head it was meant to sit under, was the mushroom cap.
+    // A ball of pea flowers on a bare peduncle. `globe` takes the placement
+    // (and the cushion under it) off the flat-disc model every composite here
+    // uses and onto a sphere, carried a little past the equator the way a real
+    // head is; `floretScale` says the florets stand well proud of it, because
+    // a clover floret is a 3mm tube, not a packed disc floret. Eighty of them
+    // is about what a head this size carries -- three hundred packed to touch
+    // on a disc made it a stippled cushion rather than a bobble.
+    head: { discRadius: 0.0080, dome: 0.0080, domeExp: 0.5, floretCount: 95,
+            bractFlare: 1.0, globe: 1.92, floretScale: 1.45 },
     rays: { whorls: [], twist: 0, notchDepth: 0, notchCount: 1, cup: 0, waviness: 0, veinCount: 3 },
     ray:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
     tip:  { carotenoid: 0.0,  anthocyanin: 0.0,  cyanic: 0.0 },
@@ -377,11 +411,14 @@ export const SPECIES = [
     stem: { height: 0.100, baseRadius: 0.00115, topRadius: 0.00095,
             leafScale: 1.0, leanMax: 0.10 },
     // The disc is the whole flower here -- there is no ray whorl to hide an
-    // unopened crown -- so the front needs to run much further than a
-    // composite's before the head reads as blooming rather than budded.
-    phenology: { bloom: 0.88, bloomSpread: 0.16, front: 0.68, frontSpread: 0.22 },
+    // unopened crown -- so an unswept front is not a bud, it is a green head.
+    // A clover ball is white essentially from the moment it opens, and it
+    // ages from the BOTTOM up rather than from the rim in (floret.wgsl does
+    // that ageing for a ray-less species), so the front is parked at the
+    // start of the sweep and the whole globe reads as florets.
+    phenology: { bloom: 1.0, bloomSpread: 0.06, front: 0.02, frontSpread: 0.05 },
     niche: { moisture: 0.55, tolerance: 0.42, exposure: 0.40, shortTurf: 0.90 },
-    dispersal: { patchRadius: 0.42, clumpiness: 0.95, spacing: 0.017 },
+    dispersal: { patchRadius: 0.46, clumpiness: 0.95, spacing: 0.014 },
   },
 ];
 
@@ -427,7 +464,11 @@ export function headRadius(species) {
   // frustum-culled) at a distance tuned for a 1mm bud rather than a 60mm leaf.
   if (species.cloverLeaf) {
     const c = species.cloverLeaf;
-    r = Math.max(r, c.petioleLength + c.leafletLength);
+    // The trefoil's own footprint, measured the way it lies: the leaflets fan
+    // out HORIZONTALLY from the hub, so the reach is the petiolule plus the
+    // leaflet, not the petiole's rise plus it. Adding the rise was harmless
+    // while the petiole was 45mm and wrong the moment it became ground cover.
+    r = Math.max(r, c.petiolule + c.leafletLength);
   }
   return r;
 }
