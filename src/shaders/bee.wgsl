@@ -30,7 +30,7 @@ const EYE_LO  = 2.5;
  */
 struct BeeXform {
   origin : vec4f,   // xyz world position of the thorax, w = uniform scale
-  right  : vec4f,   // xyz the bee's own +X
+  right  : vec4f,   // xyz the bee's own +X, w = wing fold (0 flying, 1 crawling)
   up     : vec4f,   // xyz the bee's own +Y
   fwd    : vec4f,   // xyz the bee's own +Z, w = a per-frame stipple seed
 }
@@ -45,6 +45,7 @@ struct VOut {
   @location(3) part  : f32,
   @location(4) along : f32,
   @location(5) viewZ : f32,
+  @location(6) fold  : f32,
 }
 
 struct VIn {
@@ -64,17 +65,24 @@ fn toWorld(v: vec3f) -> vec3f {
 @vertex
 fn vs(v: VIn) -> VOut {
   let s = B.origin.w;
-  let world = B.origin.xyz + toWorld(v.pos * s);
+  // Wings carry a resting shape in the bud slot -- flat against the abdomen
+  // instead of the flying beat's swept arc -- and every other part's bud
+  // equals its open pose, so this mix is a no-op everywhere but the wings.
+  let fold = B.right.w;
+  let localPos = mix(v.pos, v.budPos, fold);
+  let localNrm = normalize(mix(v.nrm, v.budNrm, fold));
+  let world = B.origin.xyz + toWorld(localPos * s);
   var o: VOut;
   o.world = world;
   // The basis is orthonormal and the scale uniform, so the normal takes the
   // same rotation as the position with nothing to correct for.
-  o.nrm = normalize(toWorld(v.nrm));
+  o.nrm = normalize(toWorld(localNrm));
   o.uv = v.uv;
   o.part = v.params.z;
   o.along = v.params.x;
   o.clip = G.viewProj * vec4f(world, 1.0);
   o.viewZ = -(G.view * vec4f(world, 1.0)).z;
+  o.fold = fold;
   return o;
 }
 
@@ -125,7 +133,9 @@ fn fs(i: VOut, @builtin(front_facing) facing: bool) -> @location(0) vec4f {
     // trickery, and everything downstream (defocus, bloom) turns the stipple
     // back into the smooth blur it is standing in for.
     let px = i.clip.xy + vec2f(B.fwd.w);
-    let keep = 0.30 + 0.34 * (1.0 - smoothstep(0.15, 1.0, i.uv.y));
+    // Folded, the wing is at rest rather than beating, so there is no blur
+    // for the stipple to stand in for -- fade it out to a solid blade.
+    let keep = mix(0.30 + 0.34 * (1.0 - smoothstep(0.15, 1.0, i.uv.y)), 1.0, i.fold);
     if (hash21(floor(px)) > keep) { discard; }
     albedo = vec3f(0.62, 0.63, 0.66);
     rough = 0.22;

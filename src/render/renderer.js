@@ -196,8 +196,12 @@ export class Renderer {
    * @param {number[]} fwd    unit, the way the bee faces
    * @param {number[]} up     unit, the bee's own up (the flower's normal when
    *                          it is crawling, world up when it is flying)
+   * @param {number} wingFold 0 spread for the flight beat blur, 1 folded flat
+   *                          against the body for crawling; bee.js bakes both
+   *                          shapes into the mesh and bee.wgsl mixes them, the
+   *                          same trick the flowers use for bud/bloom.
    */
-  setBee(pos, fwd, up, scale = 1) {
+  setBee(pos, fwd, up, scale = 1, wingFold = 0) {
     const d = this.bee.data;
     const f = normalize([fwd[0], fwd[1], fwd[2]]);
     // Re-orthogonalise against the forward, so a caller that hands over an up
@@ -207,7 +211,7 @@ export class Renderer {
     if (!Number.isFinite(u[0])) u = Math.abs(f[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
     const r = [u[1] * f[2] - u[2] * f[1], u[2] * f[0] - u[0] * f[2], u[0] * f[1] - u[1] * f[0]];
     d.set([pos[0], pos[1], pos[2], scale], 0);
-    d.set([r[0], r[1], r[2], 0], 4);
+    d.set([r[0], r[1], r[2], wingFold], 4);
     d.set([u[0], u[1], u[2], 0], 8);
     // fwd.w is a per-frame seed for the wing stipple: a fixed screen-space
     // hash would freeze the same dither pattern onto the wings and read as a

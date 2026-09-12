@@ -650,6 +650,11 @@ function resizeCanvas() {
   let lastUp = bee.upVector(null);
   let lastChase = CHASE_FLY;
   let lastMark = MARK_RADIUS;
+  // Eases toward 1 while crawling (wings folded against the body) and back to
+  // 0 in flight (wings spread for the beat blur). A plain lerp rather than
+  // another chaseBlend entry: nothing else about the camera rig cares when
+  // this settles.
+  let wingFold = 0;
 
   let last = performance.now();
   let frames = 0, fpsClock = last;
@@ -784,7 +789,8 @@ function resizeCanvas() {
     // a small constant fidget (see visualState), neither of which the
     // camera or the flight model ever sees.
     const vis = bee.visualState(sites);
-    renderer.setBee(vis.position, vis.forward, vis.up);
+    wingFold += (Number(crawling) - wingFold) * Math.min(1, dt * 6);
+    renderer.setBee(vis.position, vis.forward, vis.up, 1, wingFold);
     // Whatever the bee is standing on stays at the finest tier however the
     // metric scores it -- it is a few millimetres from the lens.
     state.pinnedPlant = bee.plant;

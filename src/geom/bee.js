@@ -50,6 +50,12 @@ function revolve(mb, { z0, z1, radius, yScale = 1, xScale = 1, part, nu = 17, nv
  * to fake the transparency. That is what a real photograph of a flying bee
  * shows, and it costs two dozen triangles.
  *
+ * The same vertices also carry a second, RESTING shape in the bud/open slots
+ * flowers use for bloom -- a flat blade laid back along the abdomen instead
+ * of the swept envelope -- so bee.wgsl can mix toward it while crawling
+ * without a second mesh or a second draw. `v`, which sweeps the beat angle in
+ * the flying shape, becomes the blade's width in the resting one.
+ *
  * @param {number} side  -1 left, +1 right
  * @param {number} root  z of the wing base on the thorax
  */
@@ -68,6 +74,15 @@ function wingArc(mb, side, { root, length, sweepFrom, sweepTo, lift, chord }) {
   }, 9, 7, {
     uv: (u, v) => [v, u], axis: (u) => u, stemHeight: 0, variant: BEE_PART.WING,
     doubleSided: true,
+    bud: (u, v) => {
+      const r = length * Math.pow(Math.sin(Math.PI * Math.pow(u, 0.62)), 0.45);
+      const halfWidth = chord * 0.28 * (1 - 0.6 * u);
+      return [
+        side * (0.0006 + (v - 0.5) * 2 * halfWidth),
+        lift * 0.6,
+        root - r,
+      ];
+    },
   });
 }
 
