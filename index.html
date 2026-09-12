@@ -30,16 +30,23 @@
   #view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
 
   #hud { position: fixed; inset: 0; pointer-events: none; }
-  #fps { position: absolute; top: env(safe-area-inset-top, 10px); left: 12px;
+  /* Debug HUD: off by default (see #showDebug), and parked in the upper
+     right rather than under the gear button so the two never overlap. */
+  #fps { position: absolute; top: calc(10px + env(safe-area-inset-top, 0px));
+    right: calc(58px + env(safe-area-inset-right, 0px));
     font-variant-numeric: tabular-nums; font-size: 11px; color: #9aa0a6;
-    text-shadow: 0 1px 3px #000; white-space: pre; line-height: 1.35; }
-  /* Flight controls. Sized for thumbs and kept clear of the panel. */
-  #mode { position: absolute; left: 12px; top: env(safe-area-inset-top, 10px);
-    margin-top: 34px; pointer-events: auto; background: var(--panel);
-    border: 1px solid var(--line); color: #e8e6e3; border-radius: 999px;
-    padding: 0 18px; min-height: 44px; font: inherit; font-size: 12.5px;
-    font-weight: 600; cursor: pointer; touch-action: manipulation;
-    -webkit-tap-highlight-color: transparent; }
+    text-shadow: 0 1px 3px #000; white-space: pre; line-height: 1.35;
+    text-align: right; }
+  /* Every control lives behind this one button now -- see #panel. Same
+     translucent dark fill and faint ring as #stick, so it reads as the same
+     kind of floating affordance rather than a solid panel chip. */
+  #gear { position: absolute; top: calc(10px + env(safe-area-inset-top, 0px));
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    width: 40px; height: 40px; border-radius: 50%; pointer-events: auto;
+    background: rgba(20,23,26,0.28); border: 2px solid rgba(232,230,227,0.22);
+    color: #e8e6e3; font-size: 18px; line-height: 1; cursor: pointer;
+    touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+  #gear:active { background: rgba(217,140,174,0.32); border-color: rgba(217,140,174,0.55); }
   #boost { position: absolute; right: calc(18px + env(safe-area-inset-right, 0px));
     bottom: calc(26px + env(safe-area-inset-bottom, 0px));
     width: 104px; height: 104px; border-radius: 50%; pointer-events: auto;
@@ -48,7 +55,6 @@
     letter-spacing: .06em; cursor: pointer; touch-action: none;
     -webkit-tap-highlight-color: transparent; transition: transform .08s, background .08s; }
   #boost:active, #boost.held { background: rgba(217,140,174,0.42); transform: scale(0.94); }
-  /* Left-aligned so it never runs under the climb button on a narrow screen. */
   /* Floating joystick: parked bottom-left as an affordance, and jumps to
      wherever the thumb actually lands so no reach is required. One stick,
      not two -- it is the whole aim now, and the second one existed only to
@@ -62,34 +68,18 @@
   #stick-knob { position: absolute; left: 50%; top: 50%; width: 56px; height: 56px;
     margin: -28px 0 0 -28px; border-radius: 50%;
     background: rgba(232,230,227,0.30); border: 1px solid rgba(232,230,227,0.45); }
-  #hint { position: absolute; left: 12px;
-    bottom: calc(172px + env(safe-area-inset-bottom, 0px)); font-size: 11px;
-    color: #9aa0a6; text-shadow: 0 1px 3px #000; pointer-events: none; }
-  #build { position: absolute; bottom: 8px; left: 12px; font-size: 10px;
-    color: #6b7176; text-shadow: 0 1px 3px #000; font-variant-numeric: tabular-nums; }
 
-  #panel { position: absolute; top: 8px; right: 8px; width: 244px; max-height: calc(100% - 16px);
+  /* Opens under the gear button rather than at the very top, so the two
+     never overlap. */
+  #panel { position: absolute; top: calc(56px + env(safe-area-inset-top, 10px));
+    right: calc(10px + env(safe-area-inset-right, 0px));
+    width: 244px; max-height: calc(100% - 72px);
     overflow-y: auto; background: var(--panel); backdrop-filter: blur(14px);
     border: 1px solid var(--line); border-radius: 11px; padding: 10px 12px 12px;
     pointer-events: auto; }
-  /* One class, not two. A `.collapsed`/`.expanded` pair fought each other:
-     after the first tap the panel carried both, and the unconditional
-     `.collapsed` rule won, so opening the panel appeared to do nothing. */
-  #panel .rows { display: none; }
-  #panel.open .rows { display: block; }
-  /* The whole header is the hit target, sized for a thumb. A 24px button in
-     the corner of a phone screen is well under the ~44px a finger reliably
-     hits. */
-  #panel header { display: flex; align-items: center; justify-content: space-between;
-    font-weight: 600; letter-spacing: .02em; min-height: 44px; padding: 0 2px;
-    cursor: pointer; user-select: none; -webkit-user-select: none;
-    touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
-  #panel.open header { margin-bottom: 6px; }
-  #panel-toggle { background: none; border: 1px solid var(--line); color: inherit;
-    border-radius: 8px; width: 40px; height: 34px; cursor: pointer; font-size: 16px;
-    line-height: 1; touch-action: manipulation; }
   .group { margin-top: 10px; font-size: 10px; text-transform: uppercase;
     letter-spacing: .09em; color: #8d949b; border-top: 1px solid var(--line); padding-top: 8px; }
+  #panel .group:first-child { margin-top: 0; border-top: none; padding-top: 0; }
   .row { display: grid; grid-template-columns: 1fr auto; align-items: center;
     gap: 4px 8px; margin: 7px 0; }
   .row label { font-size: 12px; color: #c8ccd0; }
@@ -119,16 +109,18 @@
 <canvas id="view"></canvas>
 
 <div id="hud">
-  <div id="fps"></div>
-  <div id="build"></div>
-  <button id="mode" type="button">Fly</button>
+  <div id="fps" hidden></div>
+  <button id="gear" type="button" title="Settings">⚙</button>
   <div id="stick" hidden><div id="stick-knob"></div></div>
   <button id="boost" type="button" hidden>LIFT</button>
-  <div id="hint" hidden>click to capture the mouse &middot; esc to release</div>
 
-  <div id="panel">
-    <header id="panel-header">Meadow <button id="panel-toggle" title="Show or hide controls">≡</button></header>
-    <div class="rows">
+  <div id="panel" hidden>
+
+      <div class="group">HUD</div>
+      <div class="row check">
+        <input type="checkbox" id="showDebug">
+        <label for="showDebug">Show debug text</label>
+      </div>
 
       <div class="group">Light &amp; air</div>
       <div class="row">
@@ -218,7 +210,6 @@
         <label for="autoResolution">Hold 60&nbsp;fps</label>
       </div>
 
-    </div>
   </div>
 </div>
 

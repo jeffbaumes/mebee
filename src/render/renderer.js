@@ -176,8 +176,7 @@ export class Renderer {
     this.lodBias = 1.0;
     this.grassDensity = 1.0;
     // Where the bee is, in its own frame, for the third-person draw. Written
-    // by setBee() every frame; `show` is false in the orbit view, where there
-    // is no bee to be.
+    // by setBee() every frame; `show` starts false only until that first call.
     this.bee = { show: false, data: new Float32Array(BEE_XFORM_FLOATS) };
     // World radius of the landing ring drawn straight down from the bee, or 0
     // for no mark at all. Set per frame by main.js, because whether the mark
@@ -412,11 +411,12 @@ export class Renderer {
     this.sites.count = 0;
     // Landing-readback bookkeeping.
     //
-    // In orbit mode the camera TARGET is read straight out of `sites`, and the
-    // bee's whole flight model reads it too -- so how often the table actually
-    // advances is a visible quantity, not an implementation detail. It is
-    // measured rather than assumed, because assuming "a couple of frames late"
-    // is what hid a much larger stall: see `?trace=head` and window.__headStats.
+    // The hero head's position is read straight out of `sites` (see
+    // `?trace=head` in main.js), and the bee's whole flight model reads it too
+    // -- so how often the table actually advances is a visible quantity, not
+    // an implementation detail. It is measured rather than assumed, because
+    // assuming "a couple of frames late" is what hid a much larger stall: see
+    // window.__headStats.
     //
     //   frameId          frames rendered
     //   sitesFrame       the frame the table now in `sites` was published on
@@ -1417,8 +1417,8 @@ export class Renderer {
   }
 
   /**
-   * The plant the orbit view frames, and the one that is always held at the
-   * finest tier: the biggest head near the middle of the field.
+   * The biggest head near the middle of the field -- used as a stand-in
+   * subject for diagnostics (probeStem) and the `?trace=head` readback trace.
    */
   pickHero() {
     let best = 0, bestScore = -Infinity;

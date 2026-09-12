@@ -188,12 +188,14 @@ Then open <http://localhost:8080/>. Needs Chrome/Edge 113+, Safari 26+, or
 Firefox with WebGPU enabled. HTTPS or `localhost` is required either way —
 WebGPU only exists in a secure context.
 
-Drag to orbit, wheel or pinch to zoom, **Fly** to become the bee. The panel
+You start as the bee. The gear button in the upper right opens a panel that
 exposes the shader variables that drive the scene: sun elevation, wind, petal
 unfurl, aperture, focal length, the detail bias and the grade. **Hold 60 fps**
 (on by default) moves the render scale to keep the frame inside the refresh
-interval; dragging the render-scale slider takes over by hand. The HUD's
-`gpu` line is the device's own per-pass timing, where the browser exposes
+interval; dragging the render-scale slider takes over by hand. The same panel
+has a **Show debug text** checkbox (off by default) for the fps/lod readout,
+which otherwise sits in the upper right next to the gear. The `gpu` line in
+that readout is the device's own per-pass timing, where the browser exposes
 timestamp queries.
 
 **The camera says where to go; the keys decide whether to go there.** Click to

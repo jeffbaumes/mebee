@@ -65,18 +65,6 @@ function pitchDown(dir, up, angle) {
 
 export class MacroCamera {
   constructor() {
-    this.target = [0, FLOWER.stemHeight, 0];   // the flower head
-    this.minDistance = 0.045;
-    // Far enough back to take in a stretch of the meadow, not just the plant
-    // the orbit is framing.
-    this.maxDistance = 4.0;
-    this.distance = 0.30;             // replaced by frameSubject() on first layout
-    // Auto-framing steps aside as soon as the viewer zooms themselves.
-    this.userAdjusted = false;
-
-    this.yaw = 0.75;
-    this.pitch = 0.22;
-
     this.focalLength = 0.055;         // metres
     // Stopped down well past the macro-lens default: at f/4 the field is a
     // couple of millimetres deep at bee scale, which throws almost everything
@@ -97,8 +85,6 @@ export class MacroCamera {
     // unorm24 buffer would give it.
     this.far = 80.0;
 
-    // 'orbit' inspects the flower; 'fly' is the first-person bee.
-    this.mode = 'orbit';
     this.flyPosition = [0, 0.4, 0.3];
     this.flyForward = [0, 0, -1];
     this.flyUp = [0, 1, 0];
@@ -117,47 +103,11 @@ export class MacroCamera {
   }
 
   /**
-   * Distance at which a subject of `radius` just fits the frame.
-   *
-   * The binding constraint is whichever axis is narrower, which on a portrait
-   * phone is the horizontal one -- and by a lot. Framing on vertical FOV alone
-   * looked right on a 16:9 desktop while cutting the flower off on a phone:
-   * at 0.26m a 390x844 viewport sees 52mm across, and the flower is 71mm.
-   */
-  fitDistance(radius, aspect, margin = 1.18) {
-    const halfY = this.fovY / 2;
-    const halfX = Math.atan(Math.tan(halfY) * aspect);
-    return (radius * margin) / Math.tan(Math.min(halfX, halfY));
-  }
-
-  /** Frame the subject, unless the viewer has taken manual control. */
-  frameSubject(radius, aspect) {
-    if (this.userAdjusted) return;
-    this.distance = Math.min(this.maxDistance,
-      Math.max(this.minDistance, this.fitDistance(radius, aspect)));
-  }
-
-  orbit(dx, dy) {
-    this.yaw -= dx;
-    this.pitch = Math.max(-1.35, Math.min(1.35, this.pitch + dy));
-  }
-
-  dolly(factor) {
-    this.userAdjusted = true;
-    this.distance = Math.max(this.minDistance,
-      Math.min(this.maxDistance, this.distance * factor));
-  }
-
-  /** Hand framing back to the automatic fit. */
-  resetFraming() { this.userAdjusted = false; }
-
-  /**
    * Drive the camera from the flight model. `up` is not always world up: a bee
    * crawling under a flower is upside down, and the horizon has to roll with it
    * or the view reads as the world having tipped rather than the bee.
    */
   setFly(position, forward, up = [0, 1, 0]) {
-    this.mode = 'fly';
     this.flyPosition = position;
     this.flyForward = forward;
     this.flyUp = up;
@@ -211,25 +161,6 @@ export class MacroCamera {
   }
 
   update(aspect) {
-    if (this.mode === 'fly') return this.updateFly(aspect);
-    const cp = Math.cos(this.pitch), sp = Math.sin(this.pitch);
-    this.position = [
-      this.target[0] + Math.sin(this.yaw) * cp * this.distance,
-      this.target[1] + sp * this.distance,
-      this.target[2] + Math.cos(this.yaw) * cp * this.distance,
-    ];
-    // Focusing on the orbit target is what a photographer does, and it keeps
-    // the subject sharp while the background falls away.
-    if (this.autoFocus) this.focusDistance = this.distance;
-
-    lookAt(this.view, this.position, this.target, [0, 1, 0]);
-    perspective(this.proj, this.fovY, aspect, this.near, this.far);
-    multiply(this.viewProj, this.proj, this.view);
-    invert(this.invViewProj, this.viewProj);
-    return this;
-  }
-
-  updateFly(aspect) {
     this.position = this.flyPosition;
     const at = [
       this.position[0] + this.flyForward[0],
