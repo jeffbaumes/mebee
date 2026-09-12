@@ -5,7 +5,9 @@ import { Renderer } from './render/renderer.js';
 import { MacroCamera } from './render/camera.js';
 import { ResolutionGovernor } from './render/resolution.js';
 import { BeeFlight } from './sim/flight.js';
+import { Forage, BEE_CAPACITY } from './sim/forage.js';
 import { FLOWER } from './geom/flower.js';
+import { SPECIES } from './geom/species.js';
 
 // The "hero" plant, picked from the field once it has been grown: the biggest
 // head near the middle, used for diagnostics (probeStem) and the head-position
@@ -65,6 +67,15 @@ const camera = new MacroCamera();
 const bee = new BeeFlight();
 /** @type {import('./render/renderer.js').Renderer|null} */
 let renderer = null;
+/** Per-flower pollen/nectar supply and the bee's own cargo. Built once the
+ *  field exists, since it is sized off the plant count. */
+let forage = null;
+
+const cargoPollenEl = document.getElementById('cargoPollen');
+const cargoNectarEl = document.getElementById('cargoNectar');
+const flowerBarsEl = document.getElementById('flowerBars');
+const flowerPollenEl = document.getElementById('flowerPollen');
+const flowerNectarEl = document.getElementById('flowerNectar');
 
 let fatalReported = false;
 function reportFatal(message, detail) {
@@ -578,6 +589,7 @@ function resizeCanvas() {
   // The "hero" plant, for diagnostics (probeStem) and the head-position trace.
   heroPlant = renderer.pickHero();
   renderer.headPosition(heroPlant, heroTarget);
+  forage = new Forage(renderer.plants, SPECIES);
 
   bindInput();
   bindControls();
@@ -588,7 +600,7 @@ function resizeCanvas() {
   // state can be parked somewhere specific and the frame compared against the
   // last one.
   window.__app = {
-    camera, state, bee, renderer, setFocalLength,
+    camera, state, bee, renderer, forage, setFocalLength,
     look(o = {}) {
       if (o.focal !== undefined) setFocalLength(o.focal);
       if (o.f !== undefined) camera.fNumber = o.f;
@@ -741,6 +753,20 @@ function resizeCanvas() {
     bee.update(dt, sites);
     const look = bee.viewForward();
     const crawling = bee.mode === 'crawl';
+    // Walking a flower collects from it -- see sim/forage.js. Gated on the
+    // live frame existing (not just crawl mode) so a bee parked on a plant
+    // whose site table hasn't landed yet doesn't collect against stale state.
+    if (crawling && bee.plant >= 0 && bee.currentFrame(sites)) {
+      forage.collect(bee.plant, dt);
+    }
+    cargoPollenEl.style.width = `${Math.min(100, 100 * forage.beePollen / BEE_CAPACITY)}%`;
+    cargoNectarEl.style.width = `${Math.min(100, 100 * forage.beeNectar / BEE_CAPACITY)}%`;
+    flowerBarsEl.hidden = !(crawling && bee.plant >= 0);
+    if (!flowerBarsEl.hidden) {
+      const p = bee.plant;
+      flowerPollenEl.style.width = `${100 * forage.pollen[p] / forage.pollenMax[p]}%`;
+      flowerNectarEl.style.width = `${100 * forage.nectar[p] / forage.nectarMax[p]}%`;
+    }
     const targetUp = bee.upVector(sites);
     const targetChase = crawling ? CHASE_CRAWL : CHASE_FLY;
     const targetMark = crawling ? 0 : MARK_RADIUS;

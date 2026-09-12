@@ -94,6 +94,22 @@
   #diag { margin: 6px 0 0; font: 10.5px/1.4 ui-monospace, monospace; color: #9aa0a6;
     white-space: pre-wrap; word-break: break-all; }
 
+  /* Cargo (top-left) is always up; the current flower's own supply (top-
+     centre) only shows while parked on one. Top corners rather than bottom
+     so neither ever sits under the stick or the LIFT button. */
+  .bars { position: absolute; top: calc(10px + env(safe-area-inset-top, 0px));
+    display: flex; flex-direction: column; gap: 5px; width: 132px; }
+  #cargo { left: calc(10px + env(safe-area-inset-left, 0px)); }
+  #flowerBars { left: 50%; transform: translateX(-50%); align-items: stretch; }
+  .bar-row { display: flex; align-items: center; gap: 6px; }
+  .bar-label { font-size: 10px; text-transform: uppercase; letter-spacing: .07em;
+    color: #d7dbde; text-shadow: 0 1px 3px rgba(0,0,0,0.8); width: 38px; flex: none; }
+  .bar { flex: 1; height: 7px; border-radius: 4px; overflow: hidden;
+    background: rgba(12,14,16,0.55); border: 1px solid rgba(255,255,255,0.20); }
+  .bar-fill { height: 100%; width: 0%; }
+  .bar-fill.pollen { background: linear-gradient(90deg, #cf9a1e, #f4d268); }
+  .bar-fill.nectar { background: linear-gradient(90deg, #b7568a, #f3b8d1); }
+
   #loading, #error { position: absolute; inset: 0; display: grid; place-content: center;
     text-align: center; gap: 8px; padding: 24px; pointer-events: auto;
     background: #0b0d0f; color: #e8e6e3; }
@@ -113,6 +129,21 @@
   <button id="gear" type="button" title="Settings">⚙</button>
   <div id="stick" hidden><div id="stick-knob"></div></div>
   <button id="boost" type="button" hidden>LIFT</button>
+
+  <!-- The bee's own cargo: always visible, and the only readout of how close
+       a session is to maxing out (see sim/forage.js -- there is nowhere to
+       offload it yet). -->
+  <div id="cargo" class="bars">
+    <div class="bar-row"><span class="bar-label">Pollen</span><div class="bar"><div id="cargoPollen" class="bar-fill pollen"></div></div></div>
+    <div class="bar-row"><span class="bar-label">Nectar</span><div class="bar"><div id="cargoNectar" class="bar-fill nectar"></div></div></div>
+  </div>
+
+  <!-- The flower currently underfoot. Only meaningful while crawling, so it
+       is hidden the rest of the time rather than shown empty. -->
+  <div id="flowerBars" class="bars" hidden>
+    <div class="bar-row"><span class="bar-label">Pollen</span><div class="bar"><div id="flowerPollen" class="bar-fill pollen"></div></div></div>
+    <div class="bar-row"><span class="bar-label">Nectar</span><div class="bar"><div id="flowerNectar" class="bar-fill nectar"></div></div></div>
+  </div>
 
   <div id="panel" hidden>
 

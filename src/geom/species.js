@@ -175,6 +175,9 @@ export const SPECIES = [
     disc: { carotenoid: 1.85, anthocyanin: 0.05, cyanic: 0.0 },
     guide: 0.55,      // nectar-guide strength at the ray's base
     tipReach: 0.06,   // how far down from the tip the tip pigment runs
+    // The reference forager: neither a pollen nor a nectar specialist. Every
+    // other species' forage numbers below are relative to this one.
+    forage: { pollen: { avg: 1.00, std: 0.25 }, nectar: { avg: 1.00, std: 0.25 } },
     chlorophyll: 1.35,
     stem: { height: 0.300, baseRadius: 0.00135, topRadius: 0.00105,
             leafScale: 0.85, leanMax: 0.13 },
@@ -200,6 +203,8 @@ export const SPECIES = [
     disc: { carotenoid: 2.20, anthocyanin: 0.0, cyanic: 0.0 },
     guide: 0.45,      // nectar-guide strength at the ray's base
     tipReach: 0.05,   // how far down from the tip the tip pigment runs
+    // A dense disc of 340 small florets: a pollen crop first, nectar second.
+    forage: { pollen: { avg: 1.30, std: 0.30 }, nectar: { avg: 0.70, std: 0.20 } },
     chlorophyll: 1.15,
     leafShape: LEAF_SHAPES.mayweed,
     stem: { height: 0.235, baseRadius: 0.00110, topRadius: 0.00085,
@@ -227,6 +232,9 @@ export const SPECIES = [
     disc: { carotenoid: 2.60, anthocyanin: 0.18, cyanic: 0.0 },
     guide: 0.95,      // nectar-guide strength at the ray's base
     tipReach: 0.22,   // how far down from the tip the tip pigment runs
+    // The strongest nectar guide of any species here -- it pays off in nectar,
+    // not pollen.
+    forage: { pollen: { avg: 0.80, std: 0.20 }, nectar: { avg: 1.30, std: 0.30 } },
     chlorophyll: 0.95,
     leafShape: LEAF_SHAPES.marigold,
     stem: { height: 0.255, baseRadius: 0.00150, topRadius: 0.00120,
@@ -256,6 +264,8 @@ export const SPECIES = [
     disc: { carotenoid: 1.90, anthocyanin: 0.0, cyanic: 0.0 },
     guide: 0.75,      // nectar-guide strength at the ray's base
     tipReach: 0.28,   // how far down from the tip the tip pigment runs
+    // A generalist here too: a shade more nectar than pollen, nothing extreme.
+    forage: { pollen: { avg: 0.90, std: 0.20 }, nectar: { avg: 1.10, std: 0.25 } },
     chlorophyll: 1.45,
     leafShape: LEAF_SHAPES.catsear,
     stem: { height: 0.205, baseRadius: 0.00105, topRadius: 0.00080,
@@ -286,6 +296,9 @@ export const SPECIES = [
     disc: { carotenoid: 2.05, anthocyanin: 0.0, cyanic: 0.0 },
     guide: 0.30,      // nectar-guide strength at the ray's base
     tipReach: 0.40,   // how far down from the tip the tip pigment runs
+    // Smallest head here, and the weakest guide: a modest, balanced supply of
+    // both rather than a specialist crop.
+    forage: { pollen: { avg: 0.60, std: 0.15 }, nectar: { avg: 0.60, std: 0.15 } },
     chlorophyll: 1.55,
     stem: { height: 0.078, baseRadius: 0.00075, topRadius: 0.00062,
             leafScale: 0.0, leanMax: 0.09 },
@@ -314,6 +327,9 @@ export const SPECIES = [
     disc: { carotenoid: 0.10, anthocyanin: 1.05, cyanic: 1.15 },
     guide: 0.60,      // nectar-guide strength at the ray's base
     tipReach: 0.55,   // how far down from the tip the tip pigment runs
+    // Deep trumpet florets built to hold nectar at the base, with comparatively
+    // little pollen on offer -- the far end of the nectar/pollen spread here.
+    forage: { pollen: { avg: 0.70, std: 0.20 }, nectar: { avg: 1.40, std: 0.35 } },
     chlorophyll: 0.80,
     leafShape: LEAF_SHAPES.cornflower,
     stem: { height: 0.330, baseRadius: 0.00125, topRadius: 0.00098,
@@ -339,6 +355,9 @@ export const SPECIES = [
     disc: { carotenoid: 0.04, anthocyanin: 0.20, cyanic: 0.0 },
     guide: 0.0,       // no ray whorl to guide a bee into
     tipReach: 0.0,
+    // A closed bud under the leaf canopy (see phenology below), not an open
+    // flower: there is almost nothing here for a bee to find.
+    forage: { pollen: { avg: 0.05, std: 0.02 }, nectar: { avg: 0.05, std: 0.02 } },
     chlorophyll: 1.30,
     // Attached over half way up its own stubby peduncle rather than near the
     // base: on a 12mm stem that is what puts the leaf canopy above the bud.
@@ -404,6 +423,9 @@ export const SPECIES = [
     disc: { carotenoid: 0.04, anthocyanin: 0.20, cyanic: 0.0 },
     guide: 0.0,       // no ray whorl to guide a bee into
     tipReach: 0.0,
+    // The genuine article: clover is a classic nectar plant, with only a
+    // little pollen on offer from each small pea-flower tube.
+    forage: { pollen: { avg: 0.60, std: 0.15 }, nectar: { avg: 1.50, std: 0.30 } },
     chlorophyll: 1.30,
     cloverLeaf: CLOVER_LEAF,
     // Taller than the leaf-only form so the head clears the canopy, and just
